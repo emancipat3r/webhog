@@ -65,6 +65,7 @@ func (s *StaticRenderer) Render(ctx context.Context, targetURL string) (*RenderR
 	return &RenderResult{
 		URL:     finalURL,
 		HTML:    htmlContent,
+		Headers: resp.Header,
 		JSBlobs: jsBlobs,
 	}, nil
 }

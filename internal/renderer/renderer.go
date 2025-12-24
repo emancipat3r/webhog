@@ -13,9 +13,10 @@ type JSBlob struct {
 
 // RenderResult contains the rendered page and all discovered JavaScript
 type RenderResult struct {
-	URL     string   // The final URL (after redirects)
-	HTML    string   // The page HTML
-	JSBlobs []JSBlob // All JavaScript found
+	URL     string              // The final URL (after redirects)
+	HTML    string              // The page HTML
+	Headers map[string][]string // HTTP Response Headers
+	JSBlobs []JSBlob            // All JavaScript found
 }
 
 // Renderer defines the interface for fetching and rendering web pages

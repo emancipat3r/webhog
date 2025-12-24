@@ -13,28 +13,39 @@ Inspired by the [TruffleHog browser extension](https://github.com/trufflesecurit
 - **Auto-Download Chromium**: When using headless mode, Chromium is automatically downloaded if not found (cached for future use)
 
 - **Comprehensive Detection**
-  - AWS credentials (Access Keys, Secret Keys)
+  - **TruffleHog Integration**: Includes 20+ secret detectors from the TruffleHog Browser Extension
+  - AWS credentials (Access Keys, Secret Keys, AppSync, MWS)
   - Google API keys and OAuth tokens
   - Stripe API keys
-  - GitHub Personal Access Tokens
+  - GitHub Personal Access Tokens and Legacy Tokens
+  - Facebook Access Tokens and OAuth
+  - Heroku, MailChimp, PayPal, Picatic, Square, Telegram keys
   - JWT tokens
-  - Generic API keys, tokens, secrets, passwords
+  - Password in URL
   - Database connection strings (PostgreSQL, MySQL, MongoDB, Redis)
-  - Slack webhooks and tokens
   - SSH private keys
   - And more...
 
-- **Endpoint Discovery**
-  - HTTP/HTTPS URLs
-  - WebSocket URLs
-  - API endpoints
-  - GraphQL endpoints
-  - Admin/internal routes
+- **Advanced Attack Surface Mapping**
+  - **HTML Scanning**: Scans the full HTML source, not just JavaScript blobs
+  - **Endpoint Discovery**:
+    - HTTP/HTTPS URLs
+    - Relative URLs (e.g., `/api/v1/users`)
+    - WebSocket URLs
+    - API endpoints
+    - GraphQL endpoints
+
+- **Technology Detection (Wappalyzer)**
+  - Identifies CMS, frameworks, servers, and more using [wappalyzergo](https://github.com/projectdiscovery/wappalyzergo)
+
+- **Progressive Output**
+  - **Streaming Results**: Findings are displayed immediately as they are found
+  - **Smart Labels**: Context-aware labels (e.g., "URL" for endpoints, "Secret" for tokens)
+  - **File Output**: Save clean, plain-text results to a file with `-o`/`--output`
 
 - **Beautiful Output**
   - Styled terminal output using [Lip Gloss](https://github.com/charmbracelet/lipgloss)
   - JSON output for automation and CI/CD integration
-  - Plain text mode for piping
 
 ## Installation
 
@@ -66,6 +77,12 @@ webhog scan https://example.com
 webhog scan --headless https://example.com
 ```
 
+### Save Output to File
+
+```bash
+webhog scan https://example.com -o results.txt
+```
+
 ### JSON Output
 
 ```bash
@@ -84,12 +101,13 @@ webhog scan -v https://example.com
 
 ```bash
 $ webhog scan https://example.com
-
+...
 Webhog Scan Results
 
 ╭────────────────────────────────────────╮
 │                                        │
 │  URL: https://example.com              │
+│  Tech: WordPress, Nginx                │
 │  JS Blobs: 5                           │
 │  Total Findings: 12                    │
 │                                        │
@@ -128,14 +146,15 @@ webhog scan --json https://example.com | jq '.findings[] | select(.type=="secret
 - `--headless`: Use headless browser rendering (default: false)
 - `--timeout`: Page load timeout (default: 30s)
 
-**Crawling (Future):**
-- `--max-depth`: Maximum crawl depth (default: 0 = single URL only)
-- `--same-domain`: Only follow links on same domain
-
 **Output:**
+- `-o, --output`: Write results to file
 - `--json`: Output results as JSON
 - `--quiet`: Minimal output
 - `--plain`: Disable styled output
+
+**Crawling (Future):**
+- `--max-depth`: Maximum crawl depth (default: 0 = single URL only)
+- `--same-domain`: Only follow links on same domain
 
 **Detection:**
 - `--include-entropy`: Enable entropy-based detection
@@ -147,30 +166,25 @@ webhog scan --json https://example.com | jq '.findings[] | select(.type=="secret
 Webhog includes built-in detectors for:
 
 ### Secrets & Keys
-- AWS Access Key IDs and Secret Keys
+- AWS Access Key IDs and Secret Keys, MWS, AppSync
 - Google API Keys and OAuth tokens
 - Stripe API keys (live and test)
 - GitHub Personal Access Tokens
+- Facebook Access Tokens
+- Heroku, MailChimp, PayPal, Picatic, Square, Telegram
 - JWT tokens
-- Slack webhooks and tokens
-- Twilio API keys
-- SendGrid API keys
-- MailGun API keys
-- SSH private keys
 - Generic API keys, tokens, secrets, passwords
+- SSH private keys
 
 ### Configuration
-- PostgreSQL connection strings
-- MySQL connection strings
-- MongoDB connection strings
-- Redis connection strings
+- Database connection strings (PostgreSQL, MySQL, MongoDB, Redis)
+- Passwords in URLs
 
 ### Endpoints
-- HTTP/HTTPS URLs
+- HTTP/HTTPS URLs and Relative Paths
 - WebSocket URLs
 - API endpoints (`/api/*`)
 - GraphQL endpoints
-- Admin/internal routes
 
 ## Architecture
 
@@ -182,18 +196,10 @@ webhog/
 │   └── scan.go
 ├── internal/
 │   ├── renderer/        # Page rendering (static & headless)
-│   │   ├── renderer.go
-│   │   ├── static.go
-│   │   └── headless.go
-│   ├── scanner/         # Secret detection
-│   │   ├── scanner.go
-│   │   ├── detectors.go
-│   │   └── types.go
-│   ├── ui/             # Styled output (Lip Gloss)
-│   │   ├── output.go
-│   │   └── styles.go
-│   └── config/         # Configuration
-│       └── config.go
+│   ├── scanner/         # Secret detection (Regex & Entropy)
+│   ├── tech/            # Wappalyzer integration
+│   ├── ui/              # Styled output (Lip Gloss)
+│   └── config/          # Configuration
 └── go.mod
 ```
 
@@ -244,6 +250,7 @@ Built with:
 - [Cobra](https://github.com/spf13/cobra) - CLI framework
 - [go-rod](https://github.com/go-rod/rod) - Headless browser automation
 - [Lip Gloss](https://github.com/charmbracelet/lipgloss) - Terminal styling
+- [wappalyzergo](https://github.com/projectdiscovery/wappalyzergo) - Technology detection
 
 Inspired by:
 - [TruffleHog Chrome Extension](https://github.com/trufflesecurity/Trufflehog-Chrome-Extension)

@@ -27,17 +27,48 @@ func NewScanner(includeEntropy bool, minEntropy float64, minLength int) *Scanner
 
 // Scan processes a RenderResult and returns all findings
 func (s *Scanner) Scan(result *renderer.RenderResult) []Finding {
+	findingsChan := make(chan Finding)
 	var findings []Finding
 
-	// Scan all JS blobs
-	for _, blob := range result.JSBlobs {
-		findings = append(findings, s.scanBlob(blob)...)
+	// Start streaming in a goroutine
+	go func() {
+		defer close(findingsChan)
+		s.ScanStream(result, findingsChan)
+	}()
+
+	// Collect findings
+	for f := range findingsChan {
+		findings = append(findings, f)
 	}
 
-	// Deduplicate findings
+	// Deduplicate findings (still useful for final report)
 	findings = deduplicateFindings(findings)
 
 	return findings
+}
+
+// ScanStream processes a RenderResult and sends findings to the provided channel
+func (s *Scanner) ScanStream(result *renderer.RenderResult, findingsChan chan<- Finding) {
+	// Scan all JS blobs
+	for _, blob := range result.JSBlobs {
+		blobFindings := s.scanBlob(blob)
+		for _, f := range blobFindings {
+			findingsChan <- f
+		}
+	}
+
+	// Also scan the main HTML content
+	if result.HTML != "" {
+		htmlBlob := renderer.JSBlob{
+			Source: "html",
+			Path:   result.URL,
+			Body:   result.HTML,
+		}
+		htmlFindings := s.scanBlob(htmlBlob)
+		for _, f := range htmlFindings {
+			findingsChan <- f
+		}
+	}
 }
 
 // scanBlob scans a single JavaScript blob for secrets
