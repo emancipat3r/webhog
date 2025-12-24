@@ -10,13 +10,14 @@ type Config struct {
 	ConfigFile string
 
 	// Scan flags
-	Headless      bool
-	Timeout       time.Duration
-	MaxDepth      int
-	SameDomain    bool
-	JSONOutput    bool
-	Quiet         bool
-	PlainOutput   bool
+	Headless       bool
+	Timeout        time.Duration
+	MaxDepth       int
+	SameDomain     bool
+	JSONOutput     bool
+	Quiet          bool
+	PlainOutput    bool
+	OutputFile     string
 	IncludeEntropy bool
 	MinEntropy     float64
 	MinLength      int

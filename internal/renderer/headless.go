@@ -79,6 +79,7 @@ func (h *HeadlessRenderer) Render(ctx context.Context, targetURL string) (*Rende
 	return &RenderResult{
 		URL:     finalURL,
 		HTML:    html,
+		Headers: nil, // TODO: Capture headers via request interception
 		JSBlobs: jsBlobs,
 	}, nil
 }
