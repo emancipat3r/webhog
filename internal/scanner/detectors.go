@@ -3,7 +3,6 @@ package scanner
 import "regexp"
 
 // GetDetectors returns all built-in detectors
-// GetDetectors returns all built-in detectors
 func GetDetectors() []Detector {
 	return []Detector{
 		// AWS Secrets
@@ -32,7 +31,7 @@ func GetDetectors() []Detector {
 		{
 			Name: "Google API Key",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(AIza[0-9A-Za-z\\-_]{35})`),
+			Re:   regexp.MustCompile(`(AIza[0-9A-Za-z_-]{35})`),
 		},
 		{
 			Name: "Google OAuth",
@@ -128,19 +127,19 @@ func GetDetectors() []Detector {
 		{
 			Name: "Square Access Token",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(sq0atp-[0-9A-Za-z\\-_]{22})`),
+			Re:   regexp.MustCompile(`(sq0atp-[0-9A-Za-z_-]{22})`),
 		},
 		{
 			Name: "Square OAuth Secret",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(sq0csp-[0-9A-Za-z\\-_]{43})`),
+			Re:   regexp.MustCompile(`(sq0csp-[0-9A-Za-z_-]{43})`),
 		},
 
 		// Telegram
 		{
 			Name: "Telegram Bot API Key",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`([0-9]+:AA[0-9A-Za-z\\-_]{33})`),
+			Re:   regexp.MustCompile(`([0-9]+:AA[0-9A-Za-z_-]{33})`),
 		},
 
 		// JWT
@@ -151,25 +150,28 @@ func GetDetectors() []Detector {
 		},
 
 		// Generic API Keys
+		// Generic detectors accept an optional closing quote after the key name
+		// and an optional opening quote before the value, so they match
+		// env-style (api_key=VALUE) and JSON-style ("api_key":"VALUE") alike.
 		{
 			Name: "Generic API Key",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(?i)api[_-]?key[\s:=]+["\']([A-Za-z0-9\-_]{20,})["\']`),
+			Re:   regexp.MustCompile(`(?i)api[_-]?key["\']?[\s:=]+["\']?([A-Za-z0-9\-_]{20,})`),
 		},
 		{
 			Name: "Generic Token",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(?i)(?:token|auth)[\s:=]+["\']([A-Za-z0-9\-_\.]{20,})["\']`),
+			Re:   regexp.MustCompile(`(?i)(?:token|auth)["\']?[\s:=]+["\']?([A-Za-z0-9\-_\.]{20,})`),
 		},
 		{
 			Name: "Generic Secret",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(?i)secret[\s:=]+["\']([A-Za-z0-9\-_]{20,})["\']`),
+			Re:   regexp.MustCompile(`(?i)secret["\']?[\s:=]+["\']?([A-Za-z0-9\-_]{20,})`),
 		},
 		{
 			Name: "Generic Password",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(?i)password[\s:=]+["\']([^"'\s]{8,})["\']`),
+			Re:   regexp.MustCompile(`(?i)password["\']?[\s:=]+["\']?([^"'\s]{8,})`),
 		},
 		{
 			Name: "Password in URL",
@@ -223,7 +225,7 @@ func GetDetectors() []Detector {
 		{
 			Name: "GraphQL Endpoint",
 			Type: DetectorEndpoint,
-			Re:   regexp.MustCompile(`["']([^"']*graphql[^"']*)["']`),
+			Re:   regexp.MustCompile(`(?i)["']([^"']*graphql[^"']*)["']`),
 		},
 		{
 			Name: "Admin Endpoint",
