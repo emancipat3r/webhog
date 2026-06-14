@@ -10,10 +10,6 @@ var (
 			MarginTop(1).
 			MarginBottom(1)
 
-	headerStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("14"))
-
 	// Finding type styles
 	secretStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -43,6 +39,19 @@ var (
 			Foreground(lipgloss.Color("10")).
 			Bold(true)
 
+	// Verification styles
+	verifiedValidStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("0")).
+				Background(lipgloss.Color("9")).
+				Padding(0, 1)
+
+	verifiedInvalidStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8"))
+
+	verifiedUnknownStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("11"))
+
 	// Box styles
 	summaryBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -50,8 +59,4 @@ var (
 			Padding(1, 2).
 			MarginTop(1).
 			MarginBottom(1)
-
-	errorStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("9"))
 )

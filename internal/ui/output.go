@@ -7,9 +7,19 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/user/webhog/internal/renderer"
 	"github.com/user/webhog/internal/scanner"
 )
+
+// Report is the aggregate result of a scan (one or many pages) ready for
+// display. For a single-page scan PagesCrawled is 1.
+type Report struct {
+	URL          string            `json:"url"`           // seed URL
+	Status       int               `json:"status"`        // seed HTTP status (0 if unknown)
+	PagesCrawled int               `json:"pages_crawled"` // number of pages successfully scanned
+	JSBlobs      int               `json:"js_blobs"`      // total JS blobs across all pages
+	Technologies []string          `json:"technologies"`  // union of detected technologies
+	Findings     []scanner.Finding `json:"findings"`      // deduplicated findings
+}
 
 // Outputter handles formatting and displaying results
 type Outputter struct {
@@ -68,7 +78,11 @@ func (o *Outputter) PrintFinding(w io.Writer, f scanner.Finding) {
 
 	if o.noStyle {
 		label := o.getLabelForFinding(f)
-		fmt.Fprintf(w, "[%s] %s:%d %s: %s\n", f.Detector, f.Path, f.LineNum, label, f.Token)
+		fmt.Fprintf(w, "[%s] %s:%d %s: %s", f.Detector, f.Path, f.LineNum, label, f.Token)
+		if tag := o.verificationTag(f); tag != "" {
+			fmt.Fprintf(w, " %s", tag)
+		}
+		fmt.Fprintln(w)
 		return
 	}
 
@@ -87,7 +101,11 @@ func (o *Outputter) PrintFinding(w io.Writer, f scanner.Finding) {
 
 	label := o.getLabelForFinding(f)
 
-	fmt.Fprintf(w, "\n%s %s\n", style.Render("▸"), f.Detector)
+	fmt.Fprintf(w, "\n%s %s", style.Render("▸"), f.Detector)
+	if tag := o.verificationTag(f); tag != "" {
+		fmt.Fprintf(w, "  %s", tag)
+	}
+	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %s %s:%d\n", pathStyle.Render("Location:"), f.Path, f.LineNum)
 	fmt.Fprintf(w, "  %s %s\n", tokenStyle.Render(label+":"), f.Token)
 	if f.Snippet != "" {
@@ -95,52 +113,72 @@ func (o *Outputter) PrintFinding(w io.Writer, f scanner.Finding) {
 	}
 }
 
-// Output writes the findings to the given writer
-func (o *Outputter) Output(w io.Writer, findings []scanner.Finding, result *renderer.RenderResult, technologies []string) error {
+// OutputReports writes one or more reports. For JSON, a single target is
+// emitted as one object (back-compatible) and multiple targets as an array. For
+// text, reports are written one after another.
+func (o *Outputter) OutputReports(w io.Writer, reports []*Report) error {
 	if o.jsonOutput {
-		return o.outputJSON(w, findings, result, technologies)
+		if len(reports) == 1 {
+			return o.outputJSON(w, reports[0])
+		}
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(reports)
+	}
+
+	for i, report := range reports {
+		if i > 0 {
+			fmt.Fprintln(w)
+		}
+		if err := o.Output(w, report); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Output writes the report to the given writer
+func (o *Outputter) Output(w io.Writer, report *Report) error {
+	if o.jsonOutput {
+		return o.outputJSON(w, report)
 	}
 
 	if o.noStyle {
-		return o.outputPlain(w, findings, result, technologies)
+		return o.outputPlain(w, report)
 	}
 
-	return o.outputStyled(w, findings, result, technologies)
+	return o.outputStyled(w, report)
 }
 
-// outputJSON outputs findings as JSON
-func (o *Outputter) outputJSON(w io.Writer, findings []scanner.Finding, result *renderer.RenderResult, technologies []string) error {
-	output := map[string]interface{}{
-		"url":          result.URL,
-		"js_blobs":     len(result.JSBlobs),
-		"technologies": technologies,
-		"findings":     findings,
-	}
-
+// outputJSON outputs the report as JSON
+func (o *Outputter) outputJSON(w io.Writer, report *Report) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(output)
+	return encoder.Encode(report)
 }
 
 // outputPlain outputs findings in plain text
-func (o *Outputter) outputPlain(w io.Writer, findings []scanner.Finding, result *renderer.RenderResult, technologies []string) error {
+func (o *Outputter) outputPlain(w io.Writer, report *Report) error {
+	findings := report.Findings
 	if !o.quiet {
-		fmt.Fprintf(w, "Scanned: %s\n", result.URL)
-		fmt.Fprintf(w, "Technologies: %s\n", strings.Join(technologies, ", "))
-		fmt.Fprintf(w, "JS Blobs: %d\n", len(result.JSBlobs))
+		fmt.Fprintf(w, "Scanned: %s\n", report.URL)
+		if report.Status > 0 {
+			fmt.Fprintf(w, "Status: %d\n", report.Status)
+		}
+		if report.PagesCrawled > 1 {
+			fmt.Fprintf(w, "Pages Crawled: %d\n", report.PagesCrawled)
+		}
+		fmt.Fprintf(w, "Technologies: %s\n", strings.Join(report.Technologies, ", "))
+		fmt.Fprintf(w, "JS Blobs: %d\n", report.JSBlobs)
 		fmt.Fprintf(w, "Findings: %d\n\n", len(findings))
 	}
-	// ... (rest of plain output logic omitted for brevity, logic remains same)
 	if len(findings) == 0 {
 		if !o.quiet {
 			fmt.Fprintln(w, "No secrets or interesting endpoints found.")
 		}
 		return nil
 	}
-	// ...
-	// Group findings by type
 	byType := groupByType(findings)
-	// ...
 	for _, fType := range []scanner.DetectorType{
 		scanner.DetectorSecret,
 		scanner.DetectorConfig,
@@ -157,8 +195,11 @@ func (o *Outputter) outputPlain(w io.Writer, findings []scanner.Finding, result 
 
 		for _, f := range items {
 			label := o.getLabelForFinding(f)
-			fmt.Fprintf(w, "\n[%s] %s:%d\n", f.Detector, f.Path, f.LineNum)
-			fmt.Fprintf(w, "%s: %s\n", label, f.Token)
+			fmt.Fprintf(w, "\n[%s] %s:%d", f.Detector, f.Path, f.LineNum)
+			if tag := o.verificationTag(f); tag != "" {
+				fmt.Fprintf(w, " %s", tag)
+			}
+			fmt.Fprintf(w, "\n%s: %s\n", label, f.Token)
 			if f.Snippet != "" {
 				fmt.Fprintf(w, "Context: %s\n", f.Snippet)
 			}
@@ -169,13 +210,15 @@ func (o *Outputter) outputPlain(w io.Writer, findings []scanner.Finding, result 
 }
 
 // outputStyled outputs findings with styled formatting
-func (o *Outputter) outputStyled(w io.Writer, findings []scanner.Finding, result *renderer.RenderResult, technologies []string) error {
+func (o *Outputter) outputStyled(w io.Writer, report *Report) error {
+	findings := report.Findings
+
 	// Title
 	fmt.Fprintln(w, titleStyle.Render("Webhog Scan Results"))
 
 	// Summary
 	if !o.quiet {
-		summary := o.buildSummary(result, findings, technologies)
+		summary := o.buildSummary(report)
 		fmt.Fprintln(w, summaryBoxStyle.Render(summary))
 	}
 
@@ -199,8 +242,8 @@ func (o *Outputter) outputStyled(w io.Writer, findings []scanner.Finding, result
 }
 
 // PrintSummary prints just the summary box
-func (o *Outputter) PrintSummary(w io.Writer, findings []scanner.Finding, result *renderer.RenderResult, technologies []string) {
-	summary := o.buildSummary(result, findings, technologies)
+func (o *Outputter) PrintSummary(w io.Writer, report *Report) {
+	summary := o.buildSummary(report)
 
 	if o.noStyle {
 		fmt.Fprintln(w, summary)
@@ -210,14 +253,21 @@ func (o *Outputter) PrintSummary(w io.Writer, findings []scanner.Finding, result
 }
 
 // buildSummary creates a summary string
-func (o *Outputter) buildSummary(result *renderer.RenderResult, findings []scanner.Finding, technologies []string) string {
+func (o *Outputter) buildSummary(report *Report) string {
+	findings := report.Findings
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("URL: %s\n", result.URL))
-	if len(technologies) > 0 {
-		b.WriteString(fmt.Sprintf("Tech: %s\n", strings.Join(technologies, ", ")))
+	b.WriteString(fmt.Sprintf("URL: %s\n", report.URL))
+	if report.Status > 0 {
+		b.WriteString(fmt.Sprintf("Status: %d\n", report.Status))
 	}
-	b.WriteString(fmt.Sprintf("JS Blobs: %d\n", len(result.JSBlobs)))
+	if report.PagesCrawled > 1 {
+		b.WriteString(fmt.Sprintf("Pages Crawled: %d\n", report.PagesCrawled))
+	}
+	if len(report.Technologies) > 0 {
+		b.WriteString(fmt.Sprintf("Tech: %s\n", strings.Join(report.Technologies, ", ")))
+	}
+	b.WriteString(fmt.Sprintf("JS Blobs: %d\n", report.JSBlobs))
 	b.WriteString(fmt.Sprintf("Total Findings: %d\n\n", len(findings)))
 
 	// Count by type
@@ -227,6 +277,21 @@ func (o *Outputter) buildSummary(result *renderer.RenderResult, findings []scann
 	b.WriteString(fmt.Sprintf("  Configuration: %d\n", len(byType[scanner.DetectorConfig])))
 	b.WriteString(fmt.Sprintf("  Endpoints:     %d\n", len(byType[scanner.DetectorEndpoint])))
 	b.WriteString(fmt.Sprintf("  Generic:       %d\n", len(byType[scanner.DetectorGeneric])))
+
+	// Verification summary (only when --verify attempted something).
+	var verified, active int
+	for _, f := range findings {
+		if f.Verification == scanner.VerifyNone {
+			continue
+		}
+		verified++
+		if f.Verification == scanner.VerifyValid {
+			active++
+		}
+	}
+	if verified > 0 {
+		b.WriteString(fmt.Sprintf("\nVerified Active: %d of %d checked\n", active, verified))
+	}
 
 	return b.String()
 }
@@ -242,7 +307,11 @@ func (o *Outputter) outputTypeSection(w io.Writer, title string, fType scanner.D
 
 	for _, f := range findings {
 		label := o.getLabelForFinding(f)
-		fmt.Fprintf(w, "\n%s %s\n", style.Render("▸"), f.Detector)
+		fmt.Fprintf(w, "\n%s %s", style.Render("▸"), f.Detector)
+		if tag := o.verificationTag(f); tag != "" {
+			fmt.Fprintf(w, "  %s", tag)
+		}
+		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  %s %s:%d\n", pathStyle.Render("Location:"), f.Path, f.LineNum)
 		fmt.Fprintf(w, "  %s %s\n", tokenStyle.Render(label+":"), f.Token)
 		if f.Snippet != "" {
@@ -259,6 +328,30 @@ func (o *Outputter) getLabelForFinding(f scanner.Finding) string {
 		return "URL"
 	}
 	return "Secret"
+}
+
+// verificationTag returns a short, possibly-styled tag describing a finding's
+// verification status, or an empty string when verification wasn't attempted.
+func (o *Outputter) verificationTag(f scanner.Finding) string {
+	switch f.Verification {
+	case scanner.VerifyValid:
+		if o.noStyle {
+			return "[VERIFIED ACTIVE]"
+		}
+		return verifiedValidStyle.Render("VERIFIED ACTIVE")
+	case scanner.VerifyInvalid:
+		if o.noStyle {
+			return "[inactive]"
+		}
+		return verifiedInvalidStyle.Render("inactive")
+	case scanner.VerifyUnknown:
+		if o.noStyle {
+			return "[unverified]"
+		}
+		return verifiedUnknownStyle.Render("unverified")
+	default:
+		return ""
+	}
 }
 
 // groupByType groups findings by their detector type

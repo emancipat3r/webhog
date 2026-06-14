@@ -12,6 +12,10 @@ import (
 	"golang.org/x/net/html"
 )
 
+// maxBodyBytes caps how much of any single HTTP response is read into memory,
+// guarding against accidental or malicious oversized responses.
+const maxBodyBytes = 20 << 20 // 20 MiB
+
 // StaticRenderer fetches pages using HTTP only (no JavaScript execution)
 type StaticRenderer struct {
 	client  *http.Client
@@ -44,11 +48,10 @@ func (s *StaticRenderer) Render(ctx context.Context, targetURL string) (*RenderR
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	// Scan the response regardless of status code: error pages (403, 401, 500,
+	// etc.) frequently leak stack traces, internal endpoints, and credentials,
+	// which is exactly what we want for recon.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -64,6 +67,7 @@ func (s *StaticRenderer) Render(ctx context.Context, targetURL string) (*RenderR
 
 	return &RenderResult{
 		URL:     finalURL,
+		Status:  resp.StatusCode,
 		HTML:    htmlContent,
 		Headers: resp.Header,
 		JSBlobs: jsBlobs,
@@ -140,7 +144,7 @@ func (s *StaticRenderer) fetchScript(ctx context.Context, scriptURL string) (str
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return "", err
 	}
