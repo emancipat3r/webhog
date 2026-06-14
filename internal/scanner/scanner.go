@@ -49,26 +49,75 @@ func (s *Scanner) Scan(result *renderer.RenderResult) []Finding {
 
 // ScanStream processes a RenderResult and sends findings to the provided channel
 func (s *Scanner) ScanStream(result *renderer.RenderResult, findingsChan chan<- Finding) {
-	// Scan all JS blobs
-	for _, blob := range result.JSBlobs {
-		blobFindings := s.scanBlob(blob)
-		for _, f := range blobFindings {
+	for _, blob := range scanTargets(result) {
+		for _, f := range s.scanBlob(blob) {
 			findingsChan <- f
 		}
 	}
+}
 
-	// Also scan the main HTML content
+// scanTargets returns the blobs a page is scanned over: external scripts plus
+// the page HTML. Inline scripts are excluded because their content is already
+// part of the HTML; scanning both would report every inline match twice under
+// different paths.
+func scanTargets(result *renderer.RenderResult) []renderer.JSBlob {
+	var targets []renderer.JSBlob
+	for _, blob := range result.JSBlobs {
+		if blob.Source == "inline" {
+			continue
+		}
+		targets = append(targets, blob)
+	}
 	if result.HTML != "" {
-		htmlBlob := renderer.JSBlob{
+		targets = append(targets, renderer.JSBlob{
 			Source: "html",
 			Path:   result.URL,
 			Body:   result.HTML,
-		}
-		htmlFindings := s.scanBlob(htmlBlob)
-		for _, f := range htmlFindings {
-			findingsChan <- f
+		})
+	}
+	return targets
+}
+
+// ExtractEndpoints runs only the endpoint detectors over a page and returns the
+// distinct, fetchable endpoint tokens it finds (absolute http(s) URLs and
+// absolute paths). It is used to expand the crawl frontier with URLs discovered
+// inside JavaScript and HTML, not just <a href> links.
+func (s *Scanner) ExtractEndpoints(result *renderer.RenderResult) []string {
+	seen := make(map[string]bool)
+	var endpoints []string
+
+	for _, blob := range scanTargets(result) {
+		for _, line := range strings.Split(blob.Body, "\n") {
+			for _, detector := range s.detectors {
+				if detector.Type != DetectorEndpoint {
+					continue
+				}
+				for _, match := range detector.Re.FindAllStringSubmatch(line, -1) {
+					if len(match) < 2 {
+						continue
+					}
+					token := match[1]
+					if !isFetchableEndpoint(token) || seen[token] {
+						continue
+					}
+					seen[token] = true
+					endpoints = append(endpoints, token)
+				}
+			}
 		}
 	}
+
+	return endpoints
+}
+
+// isFetchableEndpoint reports whether an endpoint token is worth queuing as a
+// crawl target: an absolute path or an http(s) URL. This filters out
+// non-navigable matches like ws:// URLs and bare "graphql" content-type
+// strings that the endpoint detectors can also catch.
+func isFetchableEndpoint(token string) bool {
+	return strings.HasPrefix(token, "/") ||
+		strings.HasPrefix(token, "http://") ||
+		strings.HasPrefix(token, "https://")
 }
 
 // scanBlob scans a single JavaScript blob for secrets

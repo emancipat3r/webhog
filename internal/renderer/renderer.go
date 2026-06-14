@@ -14,6 +14,7 @@ type JSBlob struct {
 // RenderResult contains the rendered page and all discovered JavaScript
 type RenderResult struct {
 	URL     string              // The final URL (after redirects)
+	Status  int                 // HTTP status code of the main response (0 if unknown)
 	HTML    string              // The page HTML
 	Headers map[string][]string // HTTP Response Headers
 	JSBlobs []JSBlob            // All JavaScript found

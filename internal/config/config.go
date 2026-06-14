@@ -12,8 +12,11 @@ type Config struct {
 	// Scan flags
 	Headless       bool
 	Timeout        time.Duration
+	ListFile       string
 	MaxDepth       int
+	MaxPages       int
 	SameDomain     bool
+	Robots         bool
 	JSONOutput     bool
 	Quiet          bool
 	PlainOutput    bool
@@ -21,6 +24,7 @@ type Config struct {
 	IncludeEntropy bool
 	MinEntropy     float64
 	MinLength      int
+	Verify         bool
 }
 
 // NewConfig returns a Config with sensible defaults
@@ -28,6 +32,8 @@ func NewConfig() *Config {
 	return &Config{
 		Timeout:    30 * time.Second,
 		MaxDepth:   0,
+		MaxPages:   200,
+		SameDomain: true,
 		MinEntropy: 4.5,
 		MinLength:  20,
 	}
