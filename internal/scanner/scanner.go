@@ -50,10 +50,33 @@ func (s *Scanner) Scan(result *renderer.RenderResult) []Finding {
 // ScanStream processes a RenderResult and sends findings to the provided channel
 func (s *Scanner) ScanStream(result *renderer.RenderResult, findingsChan chan<- Finding) {
 	for _, blob := range scanTargets(result) {
-		for _, f := range s.scanBlob(blob) {
+		loadedFrom := loadedFromFor(blob, result.URL)
+		for _, f := range s.scanBlob(blob, loadedFrom) {
 			findingsChan <- f
 		}
 	}
+}
+
+// loadedFromFor returns the provenance for findings produced from blob: the URL
+// of the page that referenced it. For an external (or network) JS file that is
+// the page currently being crawled (result.URL), i.e. the immediate parent in
+// the crawl path. For the page's own HTML body the resource IS the page, so
+// there is no separate loader and it returns "" (recorded as null on findings).
+func loadedFromFor(blob renderer.JSBlob, pageURL string) string {
+	if blob.Source == "html" {
+		return ""
+	}
+	return pageURL
+}
+
+// loadedFromPtr converts a loaded-from URL into the optional value carried on a
+// Finding: nil (serialized as null) for the empty page-body case, otherwise a
+// pointer to the loader URL.
+func loadedFromPtr(loadedFrom string) *string {
+	if loadedFrom == "" {
+		return nil
+	}
+	return &loadedFrom
 }
 
 // scanTargets returns the blobs a page is scanned over: external scripts plus
@@ -120,8 +143,11 @@ func isFetchableEndpoint(token string) bool {
 		strings.HasPrefix(token, "https://")
 }
 
-// scanBlob scans a single JavaScript blob for secrets
-func (s *Scanner) scanBlob(blob renderer.JSBlob) []Finding {
+// scanBlob scans a single JavaScript blob for secrets. loadedFrom is the URL of
+// the page that referenced this blob (empty when the blob is the page's own
+// body), threaded onto every finding so consumers know where the resource in
+// Path was loaded from.
+func (s *Scanner) scanBlob(blob renderer.JSBlob, loadedFrom string) []Finding {
 	var findings []Finding
 
 	lines := strings.Split(blob.Body, "\n")
@@ -139,19 +165,20 @@ func (s *Scanner) scanBlob(blob renderer.JSBlob) []Finding {
 				snippet := createSnippet(line, token)
 
 				findings = append(findings, Finding{
-					Detector: detector.Name,
-					Type:     detector.Type,
-					Path:     blob.Path,
-					LineNum:  lineNum + 1,
-					Snippet:  snippet,
-					Token:    token,
+					Detector:   detector.Name,
+					Type:       detector.Type,
+					Path:       blob.Path,
+					LineNum:    lineNum + 1,
+					Snippet:    snippet,
+					Token:      token,
+					LoadedFrom: loadedFromPtr(loadedFrom),
 				})
 			}
 		}
 
 		// Optional: Entropy-based detection
 		if s.includeEntropy {
-			findings = append(findings, s.detectHighEntropy(blob.Path, lineNum+1, line)...)
+			findings = append(findings, s.detectHighEntropy(blob.Path, lineNum+1, line, loadedFrom)...)
 		}
 	}
 
@@ -159,7 +186,7 @@ func (s *Scanner) scanBlob(blob renderer.JSBlob) []Finding {
 }
 
 // detectHighEntropy finds high-entropy strings that might be secrets
-func (s *Scanner) detectHighEntropy(path string, lineNum int, line string) []Finding {
+func (s *Scanner) detectHighEntropy(path string, lineNum int, line string, loadedFrom string) []Finding {
 	var findings []Finding
 
 	// Tokenize the line (simple word splitting)
@@ -176,12 +203,13 @@ func (s *Scanner) detectHighEntropy(path string, lineNum int, line string) []Fin
 		if entropy >= s.minEntropy {
 			snippet := createSnippet(line, token)
 			findings = append(findings, Finding{
-				Detector: "High Entropy String",
-				Type:     DetectorGeneric,
-				Path:     path,
-				LineNum:  lineNum,
-				Snippet:  snippet,
-				Token:    token,
+				Detector:   "High Entropy String",
+				Type:       DetectorGeneric,
+				Path:       path,
+				LineNum:    lineNum,
+				Snippet:    snippet,
+				Token:      token,
+				LoadedFrom: loadedFromPtr(loadedFrom),
 			})
 		}
 	}
