@@ -20,16 +20,28 @@ const maxBodyBytes = 20 << 20 // 20 MiB
 type StaticRenderer struct {
 	client  *http.Client
 	timeout time.Duration
+	httpCfg HTTPConfig
 }
 
-// NewStaticRenderer creates a new static renderer
-func NewStaticRenderer(timeout time.Duration) *StaticRenderer {
+// NewStaticRenderer creates a new static renderer. httpCfg customizes the
+// User-Agent and headers sent on every request (page and sub-resource fetches);
+// pass the zero value for default behavior.
+func NewStaticRenderer(timeout time.Duration, httpCfg HTTPConfig) *StaticRenderer {
 	return &StaticRenderer{
 		client: &http.Client{
 			Timeout: timeout,
 		},
 		timeout: timeout,
+		httpCfg: httpCfg,
 	}
+}
+
+// setRequestHeaders applies the default User-Agent and then the caller's
+// HTTPConfig (custom UA and extra headers) to req, so every outbound request
+// from this renderer carries the same identity.
+func (s *StaticRenderer) setRequestHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", defaultUserAgent)
+	s.httpCfg.Apply(req)
 }
 
 // Render fetches a page and extracts HTML and JavaScript
@@ -40,7 +52,7 @@ func (s *StaticRenderer) Render(ctx context.Context, targetURL string) (*RenderR
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", "webhog/0.1.0 (https://github.com/user/webhog)")
+	s.setRequestHeaders(req)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -132,7 +144,7 @@ func (s *StaticRenderer) fetchScript(ctx context.Context, scriptURL string) (str
 		return "", err
 	}
 
-	req.Header.Set("User-Agent", "webhog/0.1.0 (https://github.com/user/webhog)")
+	s.setRequestHeaders(req)
 
 	resp, err := s.client.Do(req)
 	if err != nil {

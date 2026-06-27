@@ -18,12 +18,18 @@ import (
 // HeadlessRenderer uses a headless browser (rod) to render pages
 type HeadlessRenderer struct {
 	timeout time.Duration
+	httpCfg HTTPConfig
 }
 
-// NewHeadlessRenderer creates a new headless renderer
-func NewHeadlessRenderer(timeout time.Duration) *HeadlessRenderer {
+// NewHeadlessRenderer creates a new headless renderer. httpCfg customizes the
+// User-Agent and headers applied to every request: at the browser/page level
+// (so they propagate to the main document and all sub-resources the browser
+// loads) and on the direct HTTP client used to fetch external scripts. Pass the
+// zero value for default behavior.
+func NewHeadlessRenderer(timeout time.Duration, httpCfg HTTPConfig) *HeadlessRenderer {
 	return &HeadlessRenderer{
 		timeout: timeout,
+		httpCfg: httpCfg,
 	}
 }
 
@@ -65,6 +71,13 @@ func (h *HeadlessRenderer) Render(ctx context.Context, targetURL string) (*Rende
 	// technology detection has access to server/cookie headers and we can
 	// report the status, mirroring static mode.
 	readResponse := h.captureResponse(page)
+
+	// Apply the custom User-Agent and extra headers at the page level BEFORE
+	// navigating, so they ride along on the main document and every sub-resource
+	// (JS, XHR/fetch, images) the browser requests.
+	if err := h.applyRequestOptions(page); err != nil {
+		return nil, fmt.Errorf("applying request options: %w", err)
+	}
 
 	// Navigate to the target URL.
 	if err := page.Navigate(targetURL); err != nil {
@@ -108,6 +121,25 @@ func (h *HeadlessRenderer) Render(ctx context.Context, targetURL string) (*Rende
 		Headers: headers,
 		JSBlobs: jsBlobs,
 	}, nil
+}
+
+// applyRequestOptions sets the configured User-Agent and extra headers on the
+// browser page so they propagate to the main document and all sub-resources.
+// When no User-Agent override is configured it leaves the browser default
+// untouched (preserving current behavior). Setting extra headers enables the
+// network domain, which is idempotent with captureResponse.
+func (h *HeadlessRenderer) applyRequestOptions(page *rod.Page) error {
+	if h.httpCfg.UserAgent != "" {
+		if err := page.SetUserAgent(&proto.NetworkSetUserAgentOverride{UserAgent: h.httpCfg.UserAgent}); err != nil {
+			return fmt.Errorf("setting user-agent: %w", err)
+		}
+	}
+	if pairs := h.httpCfg.HeaderPairs(); len(pairs) > 0 {
+		if _, err := page.SetExtraHeaders(pairs); err != nil {
+			return fmt.Errorf("setting extra headers: %w", err)
+		}
+	}
+	return nil
 }
 
 // captureResponse subscribes to network events and records the status and
@@ -214,7 +246,8 @@ func (h *HeadlessRenderer) fetchScript(scriptURL string) (string, error) {
 		return "", err
 	}
 
-	req.Header.Set("User-Agent", "webhog/0.1.0 (https://github.com/user/webhog)")
+	req.Header.Set("User-Agent", defaultUserAgent)
+	h.httpCfg.Apply(req)
 
 	resp, err := client.Do(req)
 	if err != nil {

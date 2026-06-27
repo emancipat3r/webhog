@@ -54,6 +54,12 @@ func init() {
 	scanCmd.Flags().BoolVar(&cfg.PlainOutput, "plain", false, "disable styled output")
 	scanCmd.Flags().StringVarP(&cfg.OutputFile, "output", "o", "", "write results to file")
 
+	// HTTP identity flags. These apply to every outbound request webhog makes
+	// (page fetches, referenced JS, and the headless browser's sub-resources) so
+	// recon traffic can be attributed, as some bug-bounty programs require.
+	scanCmd.Flags().StringVar(&cfg.UserAgent, "user-agent", "", "User-Agent to send on every request (empty = webhog default)")
+	scanCmd.Flags().StringArrayVar(&cfg.Headers, "header", nil, "extra request header as \"Key: Value\"; repeatable")
+
 	// Detection flags
 	scanCmd.Flags().BoolVar(&cfg.Verify, "verify", false, "validate detected secrets against provider APIs (makes outbound read-only requests using the discovered credentials)")
 	scanCmd.Flags().BoolVar(&cfg.IncludeEntropy, "include-entropy", false, "enable entropy-based detection")
@@ -70,11 +76,12 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// Renderer and tech detector are created once and reused across targets.
 	// Per-page timeouts are applied by the crawler, so the base context carries
 	// no overall deadline.
+	httpCfg := buildHTTPConfig()
 	var r renderer.Renderer
 	if cfg.Headless {
-		r = renderer.NewHeadlessRenderer(cfg.Timeout)
+		r = renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg)
 	} else {
-		r = renderer.NewStaticRenderer(cfg.Timeout)
+		r = renderer.NewStaticRenderer(cfg.Timeout, httpCfg)
 	}
 	detector, _ := tech.NewDetector()
 
@@ -152,7 +159,7 @@ func scanOne(r renderer.Renderer, detector *tech.Detector, target string) (*ui.R
 	// enumerated even without deep crawling.
 	seeds := []string{target}
 	if cfg.Robots {
-		robotsTargets := crawler.RobotsTargets(context.Background(), target, &http.Client{Timeout: cfg.Timeout})
+		robotsTargets := crawler.RobotsTargets(context.Background(), target, &http.Client{Timeout: cfg.Timeout}, buildHTTPConfig())
 		if cfg.Verbose && !cfg.Quiet {
 			fmt.Fprintf(os.Stderr, "robots.txt: enumerating %d path(s)\n", len(robotsTargets))
 		}
@@ -239,6 +246,24 @@ func scanOne(r renderer.Renderer, detector *tech.Detector, target string) (*ui.R
 	}
 
 	return report, nil
+}
+
+// buildHTTPConfig assembles the per-request identity (custom User-Agent and
+// extra headers) applied to every outbound request. Each --header is "Key:
+// Value", split on the first colon; malformed entries (no colon or an empty key)
+// are reported and skipped rather than aborting the scan.
+func buildHTTPConfig() renderer.HTTPConfig {
+	hc := renderer.HTTPConfig{UserAgent: strings.TrimSpace(cfg.UserAgent)}
+	for _, raw := range cfg.Headers {
+		key, value, found := strings.Cut(raw, ":")
+		key = strings.TrimSpace(key)
+		if !found || key == "" {
+			fmt.Fprintf(os.Stderr, "ignoring malformed --header %q (expected \"Key: Value\")\n", raw)
+			continue
+		}
+		hc.Headers = append(hc.Headers, renderer.Header{Key: key, Value: strings.TrimSpace(value)})
+	}
+	return hc
 }
 
 // collectTargets gathers scan targets from positional args, --list, and (when
