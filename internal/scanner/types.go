@@ -39,4 +39,10 @@ type Finding struct {
 	Snippet      string       `json:"snippet"`                // Context around the match
 	Token        string       `json:"token"`                  // The actual match
 	Verification Verification `json:"verification,omitempty"` // Provider validation result (--verify)
+	// LoadedFrom is the URL of the HTML page that referenced the resource named
+	// in Path. It is set when the match lives in an external JS file pulled in by
+	// a page, giving downstream consumers the provenance of the secret. It is nil
+	// (serialized as null) when the match is in the page's own HTML/inline body,
+	// because Path already is that page.
+	LoadedFrom *string `json:"loaded_from"`
 }
