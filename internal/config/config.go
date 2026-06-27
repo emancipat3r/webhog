@@ -25,6 +25,10 @@ type Config struct {
 	MinEntropy     float64
 	MinLength      int
 	Verify         bool
+
+	// Outbound HTTP identity, applied to every request webhog makes.
+	UserAgent string   // custom User-Agent (empty = default)
+	Headers   []string // extra request headers, each "Key: Value"
 }
 
 // NewConfig returns a Config with sensible defaults

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/user/webhog/internal/renderer"
 )
 
 func TestCleanRobotsPath(t *testing.T) {
@@ -48,7 +50,7 @@ Sitemap: ` + "SITEMAP_URL" + `
 	defer srv.Close()
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	got := RobotsTargets(context.Background(), srv.URL+"/", client)
+	got := RobotsTargets(context.Background(), srv.URL+"/", client, renderer.HTTPConfig{})
 	sort.Strings(got)
 
 	want := []string{
@@ -75,7 +77,7 @@ func TestRobotsTargetsAbsent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if got := RobotsTargets(context.Background(), srv.URL+"/", &http.Client{Timeout: 2 * time.Second}); got != nil {
+	if got := RobotsTargets(context.Background(), srv.URL+"/", &http.Client{Timeout: 2 * time.Second}, renderer.HTTPConfig{}); got != nil {
 		t.Errorf("expected nil for missing robots.txt, got %v", got)
 	}
 }

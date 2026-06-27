@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/user/webhog/internal/renderer"
 )
 
 const maxRobotsBytes = 1 << 20 // 1 MiB
@@ -22,7 +24,7 @@ const maxRobotsBytes = 1 << 20 // 1 MiB
 // to inspect. It issues a single GET and adds no crawl load beyond the paths it
 // discovers (still bounded by --max-pages). Returns nil if robots.txt is absent
 // or unreadable.
-func RobotsTargets(ctx context.Context, seedURL string, client *http.Client) []string {
+func RobotsTargets(ctx context.Context, seedURL string, client *http.Client, httpCfg renderer.HTTPConfig) []string {
 	base, err := url.Parse(seedURL)
 	if err != nil || base.Host == "" {
 		return nil
@@ -34,6 +36,7 @@ func RobotsTargets(ctx context.Context, seedURL string, client *http.Client) []s
 		return nil
 	}
 	req.Header.Set("User-Agent", "webhog/0.1.0 (https://github.com/user/webhog)")
+	httpCfg.Apply(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
