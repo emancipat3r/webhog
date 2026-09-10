@@ -4,7 +4,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/user/webhog/internal/renderer"
+	"github.com/emancipat3r/webhog/internal/renderer"
 )
 
 // Scanner scans rendered pages for secrets and endpoints

@@ -1,13 +1,17 @@
 package renderer
 
 import (
+	"context"
 	"net/http"
 	"strings"
+
+	"github.com/emancipat3r/webhog/internal/ratelimit"
+	"github.com/emancipat3r/webhog/internal/version"
 )
 
 // defaultUserAgent is the User-Agent webhog sends when the caller does not
-// override it via --user-agent.
-const defaultUserAgent = "webhog/0.1.0 (https://github.com/user/webhog)"
+// override it via --user-agent. It carries the build version.
+var defaultUserAgent = version.UserAgent()
 
 // Header is a single extra request header supplied by the caller.
 type Header struct {
@@ -27,6 +31,18 @@ type HTTPConfig struct {
 	UserAgent string
 	// Headers are extra request headers added to every request, applied in order.
 	Headers []Header
+	// Limiter paces every request webhog originates against the target: page
+	// fetches, script fetches in static mode, robots.txt, and headless
+	// navigations. nil means unlimited. Sub-resources the browser fetches on
+	// its own during a navigation are outside its reach; one navigation
+	// counts as one request.
+	Limiter *ratelimit.Limiter
+}
+
+// Wait blocks until the limiter allows the next request (immediately when no
+// limiter is configured). It returns ctx's error if ctx ends first.
+func (c HTTPConfig) Wait(ctx context.Context) error {
+	return c.Limiter.Wait(ctx)
 }
 
 // reservedHeader reports whether key names a request header that webhog manages

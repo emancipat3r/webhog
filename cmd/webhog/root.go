@@ -1,8 +1,9 @@
 package main
 
 import (
+	"github.com/emancipat3r/webhog/internal/config"
+	"github.com/emancipat3r/webhog/internal/version"
 	"github.com/spf13/cobra"
-	"github.com/user/webhog/internal/config"
 )
 
 var cfg = &config.Config{}
@@ -13,7 +14,7 @@ var rootCmd = &cobra.Command{
 	Long: `Webhog is a CLI tool that scans web pages for secrets, API keys,
 tokens, and interesting endpoints. It supports both static (HTTP-only)
 and headless browser modes for JavaScript-heavy applications.`,
-	Version: "0.1.0",
+	Version: version.String(),
 }
 
 func init() {

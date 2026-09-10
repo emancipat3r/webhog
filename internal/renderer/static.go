@@ -54,6 +54,9 @@ func (s *StaticRenderer) Render(ctx context.Context, targetURL string) (*RenderR
 
 	s.setRequestHeaders(req)
 
+	if err := s.httpCfg.Wait(ctx); err != nil {
+		return nil, err
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching page: %w", err)
@@ -72,7 +75,7 @@ func (s *StaticRenderer) Render(ctx context.Context, targetURL string) (*RenderR
 	finalURL := resp.Request.URL.String()
 
 	// Parse HTML and extract JavaScript
-	jsBlobs, err := s.extractJavaScript(ctx, htmlContent, finalURL)
+	jsBlobs, resourceErrs, err := s.extractJavaScript(ctx, htmlContent, finalURL)
 	if err != nil {
 		return nil, fmt.Errorf("extracting JavaScript: %w", err)
 	}
@@ -83,17 +86,19 @@ func (s *StaticRenderer) Render(ctx context.Context, targetURL string) (*RenderR
 		HTML:    htmlContent,
 		Headers: resp.Header,
 		JSBlobs: jsBlobs,
+		Errors:  resourceErrs,
 	}, nil
 }
 
 // extractJavaScript parses HTML and extracts all JavaScript (inline and external)
-func (s *StaticRenderer) extractJavaScript(ctx context.Context, htmlContent, baseURL string) ([]JSBlob, error) {
+func (s *StaticRenderer) extractJavaScript(ctx context.Context, htmlContent, baseURL string) ([]JSBlob, []ResourceError, error) {
 	doc, err := html.Parse(strings.NewReader(htmlContent))
 	if err != nil {
-		return nil, fmt.Errorf("parsing HTML: %w", err)
+		return nil, nil, fmt.Errorf("parsing HTML: %w", err)
 	}
 
 	var jsBlobs []JSBlob
+	var errs []ResourceError
 	inlineCounter := 0
 
 	var traverse func(*html.Node)
@@ -102,15 +107,20 @@ func (s *StaticRenderer) extractJavaScript(ctx context.Context, htmlContent, bas
 			// Check if it's inline or external
 			src := getAttr(n, "src")
 			if src != "" {
-				// External script
+				// External script. Fetch failures are recorded, not dropped,
+				// so a page whose scripts were all refused is distinguishable
+				// from a page with no scripts.
 				scriptURL, err := resolveURL(baseURL, src)
 				if err == nil {
-					content, err := s.fetchScript(ctx, scriptURL)
-					if err == nil {
+					content, status, err := s.fetchScript(ctx, scriptURL)
+					if err != nil {
+						errs = append(errs, ResourceError{URL: scriptURL, Err: err.Error()})
+					} else {
 						jsBlobs = append(jsBlobs, JSBlob{
 							Source: "external",
 							Path:   scriptURL,
 							Body:   content,
+							Status: status,
 						})
 					}
 				}
@@ -134,34 +144,36 @@ func (s *StaticRenderer) extractJavaScript(ctx context.Context, htmlContent, bas
 	}
 
 	traverse(doc)
-	return jsBlobs, nil
+	return jsBlobs, errs, nil
 }
 
-// fetchScript fetches an external JavaScript file
-func (s *StaticRenderer) fetchScript(ctx context.Context, scriptURL string) (string, error) {
+// fetchScript fetches an external JavaScript file and returns its body and
+// HTTP status. Like the page fetch, the body is returned for every status:
+// error pages leak stack traces and internal endpoints, and a 403 from bot
+// management is itself a signal the caller wants to see (via Status).
+func (s *StaticRenderer) fetchScript(ctx context.Context, scriptURL string) (string, int, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", scriptURL, nil)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	s.setRequestHeaders(req)
 
+	if err := s.httpCfg.Wait(ctx); err != nil {
+		return "", 0, err
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
-		return "", err
+		return "", resp.StatusCode, err
 	}
 
-	return string(body), nil
+	return string(body), resp.StatusCode, nil
 }
 
 // getAttr returns the value of an attribute from an HTML node

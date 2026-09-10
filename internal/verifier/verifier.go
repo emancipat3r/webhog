@@ -15,7 +15,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/user/webhog/internal/scanner"
+	"github.com/emancipat3r/webhog/internal/scanner"
+	"github.com/emancipat3r/webhog/internal/version"
 )
 
 // checkFunc validates a single token and returns its verification status.
@@ -84,7 +85,7 @@ func do(ctx context.Context, client *http.Client, method, url string, headers ma
 	if err != nil {
 		return 0, nil, err
 	}
-	req.Header.Set("User-Agent", "webhog/0.1.0 (https://github.com/user/webhog)")
+	req.Header.Set("User-Agent", version.UserAgent())
 	for k, val := range headers {
 		req.Header.Set(k, val)
 	}

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/user/webhog/internal/renderer"
+	"github.com/emancipat3r/webhog/internal/renderer"
 )
 
 func TestCleanRobotsPath(t *testing.T) {

@@ -7,18 +7,23 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/user/webhog/internal/scanner"
+	"github.com/emancipat3r/webhog/internal/scanner"
 )
 
 // Report is the aggregate result of a scan (one or many pages) ready for
-// display. For a single-page scan PagesCrawled is 1.
+// display. For a single-page scan PagesCrawled is 1. A target that could not
+// be scanned at all still produces a Report, with Error set and every other
+// field zero, so a consumer can tell "nothing found" from "never looked".
 type Report struct {
-	URL          string            `json:"url"`           // seed URL
-	Status       int               `json:"status"`        // seed HTTP status (0 if unknown)
-	PagesCrawled int               `json:"pages_crawled"` // number of pages successfully scanned
-	JSBlobs      int               `json:"js_blobs"`      // total JS blobs across all pages
-	Technologies []string          `json:"technologies"`  // union of detected technologies
-	Findings     []scanner.Finding `json:"findings"`      // deduplicated findings
+	Webhog       string            `json:"webhog"`          // build that produced this report (version and commit)
+	URL          string            `json:"url"`             // seed URL
+	Error        string            `json:"error,omitempty"` // why the target could not be scanned (empty on success)
+	Status       int               `json:"status"`          // seed HTTP status (0 if unknown)
+	PagesCrawled int               `json:"pages_crawled"`   // number of pages successfully scanned
+	JSBlobs      int               `json:"js_blobs"`        // total JS blobs across all pages
+	JSRefused    int               `json:"js_refused"`      // external resources that failed to load or returned 4xx/5xx
+	Technologies []string          `json:"technologies"`    // union of detected technologies
+	Findings     []scanner.Finding `json:"findings"`        // deduplicated findings
 }
 
 // Outputter handles formatting and displaying results
@@ -113,6 +118,19 @@ func (o *Outputter) PrintFinding(w io.Writer, f scanner.Finding) {
 	}
 }
 
+// OutputJSONL writes one report as a single compact JSON line. It is the
+// streaming counterpart of OutputReports: callers emit each target as it
+// completes, so a run that is killed part-way leaves every finished target
+// readable in the output.
+func (o *Outputter) OutputJSONL(w io.Writer, report *Report) error {
+	b, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(b, '\n'))
+	return err
+}
+
 // OutputReports writes one or more reports. For JSON, a single target is
 // emitted as one object (back-compatible) and multiple targets as an array. For
 // text, reports are written one after another.
@@ -159,6 +177,10 @@ func (o *Outputter) outputJSON(w io.Writer, report *Report) error {
 
 // outputPlain outputs findings in plain text
 func (o *Outputter) outputPlain(w io.Writer, report *Report) error {
+	if report.Error != "" {
+		fmt.Fprintf(w, "Scanned: %s\nError: %s\n", report.URL, report.Error)
+		return nil
+	}
 	findings := report.Findings
 	if !o.quiet {
 		fmt.Fprintf(w, "Scanned: %s\n", report.URL)
@@ -170,6 +192,9 @@ func (o *Outputter) outputPlain(w io.Writer, report *Report) error {
 		}
 		fmt.Fprintf(w, "Technologies: %s\n", strings.Join(report.Technologies, ", "))
 		fmt.Fprintf(w, "JS Blobs: %d\n", report.JSBlobs)
+		if report.JSRefused > 0 {
+			fmt.Fprintf(w, "JS Refused: %d\n", report.JSRefused)
+		}
 		fmt.Fprintf(w, "Findings: %d\n\n", len(findings))
 	}
 	if len(findings) == 0 {
@@ -215,6 +240,11 @@ func (o *Outputter) outputStyled(w io.Writer, report *Report) error {
 
 	// Title
 	fmt.Fprintln(w, titleStyle.Render("Webhog Scan Results"))
+
+	if report.Error != "" {
+		fmt.Fprintln(w, summaryBoxStyle.Render(fmt.Sprintf("URL: %s\nError: %s", report.URL, report.Error)))
+		return nil
+	}
 
 	// Summary
 	if !o.quiet {
@@ -268,6 +298,9 @@ func (o *Outputter) buildSummary(report *Report) string {
 		b.WriteString(fmt.Sprintf("Tech: %s\n", strings.Join(report.Technologies, ", ")))
 	}
 	b.WriteString(fmt.Sprintf("JS Blobs: %d\n", report.JSBlobs))
+	if report.JSRefused > 0 {
+		b.WriteString(fmt.Sprintf("JS Refused: %d\n", report.JSRefused))
+	}
 	b.WriteString(fmt.Sprintf("Total Findings: %d\n\n", len(findings)))
 
 	// Count by type

@@ -8,7 +8,12 @@ Inspired by the [TruffleHog browser extension](https://github.com/trufflesecurit
 
 - **Dual Scanning Modes**
   - **Static Mode** (default): Fast HTTP-only scanning without JavaScript execution
-  - **Headless Mode**: Full browser rendering for JavaScript-heavy SPAs using [go-rod](https://github.com/go-rod/rod)
+  - **Headless Mode**: Full browser rendering for JavaScript-heavy SPAs using [go-rod](https://github.com/go-rod/rod).
+    Every byte comes through Chrome's own network stack, including external
+    scripts and runtime `fetch`/XHR responses, so hosts behind bot management
+    that reject non-browser TLS fingerprints still yield their JavaScript.
+    One Chromium process serves the whole run; each target gets its own
+    incognito context.
 
 - **Auto-Download Chromium**: When using headless mode, Chromium is automatically downloaded if not found (cached for future use)
 
@@ -47,6 +52,16 @@ Inspired by the [TruffleHog browser extension](https://github.com/trufflesecurit
   - **Streaming Results**: Findings are displayed immediately as they are found
   - **Smart Labels**: Context-aware labels (e.g., "URL" for endpoints, "Secret" for tokens)
   - **File Output**: Save clean, plain-text results to a file with `-o`/`--output`
+  - **JSON Lines**: `--jsonl` writes one report per target the moment it
+    completes, so a run that is killed part-way still leaves every finished
+    target on disk
+
+- **Rate Limiting and Concurrency**
+  - `--rate-limit` / `--delay` cap the requests webhog originates across the
+    whole run, so it can honor a program's request ceiling like the rest of a
+    recon pipeline
+  - `--concurrency` renders several pages of a target at once and
+    `--parallel` scans several targets at once, always under the same ceiling
 
 - **Beautiful Output**
   - Styled terminal output using [Lip Gloss](https://github.com/charmbracelet/lipgloss)
@@ -54,13 +69,25 @@ Inspired by the [TruffleHog browser extension](https://github.com/trufflesecurit
 
 ## Installation
 
+### With `go install`
+
+```bash
+go install github.com/emancipat3r/webhog/cmd/webhog@latest
+```
+
 ### From Source
 
 ```bash
-git clone https://github.com/user/webhog
+git clone https://github.com/emancipat3r/webhog
 cd webhog
-go build -o webhog ./cmd/webhog
+make build        # stamps the version and commit into the binary
+./webhog --version
 ```
+
+`webhog --version` and the `webhog` field of every JSON report identify the
+build that produced a result. `make build` stamps them from git; a plain
+`go build` or `go install ...@vX.Y.Z` falls back to the module version and VCS
+revision Go embeds.
 
 ### Requirements
 
@@ -82,6 +109,20 @@ webhog scan https://example.com
 webhog scan --headless https://example.com
 ```
 
+Headless mode navigates with a real Chromium and reads external scripts, and
+runtime `fetch`/XHR responses, out of the responses the browser itself
+received. Nothing is re-fetched with Go's HTTP client, whose TLS and HTTP/2
+fingerprint is what Cloudflare-class bot management rejects before it reads a
+single header. A script the server refuses is kept anyway (error pages leak)
+and counted under `js_refused`, so a page whose scripts were all blocked is
+distinguishable from a page with none.
+
+One browser process is launched per run, on first use, and reused for every
+page. Each target is rendered in its own incognito context, so cookies and
+storage never bleed between hosts. After `window.onload` the page gets
+`--dom-wait` (default 3s) to settle before it is read; raise it for SPAs that
+load slowly, lower it for speed.
+
 ### Scan Many Targets
 
 Pass multiple URLs, read them from a file with `--list`, or pipe them on stdin
@@ -98,9 +139,43 @@ webhog scan --list hosts.txt --robots
 
 Each target is scanned and crawled **independently** and gets its own report
 (with `--same-domain` on, a target only crawls within its own apex domain — so a
-50-host list is 50 scoped crawls). A failing host is reported and skipped rather
-than aborting the run. With `--json`, one target emits a single object and many
-targets emit an array.
+50-host list is 50 scoped crawls). A host that cannot be scanned at all still
+gets a report, with an `error` field and nothing else, so the output shows
+coverage rather than just findings; the run continues and the process exits
+non-zero only when no target could be scanned. With `--json`, one target emits
+a single object and many targets emit an array.
+
+### Stream Results as JSON Lines
+
+```bash
+webhog scan --list hosts.txt --jsonl -o results.jsonl
+```
+
+`--jsonl` writes one compact JSON report per line, per target, the moment that
+target completes. Unlike `--json` (a single array that can only be written
+when the run ends), a run that is killed by a timeout or an OOM leaves every
+completed target readable in the file. Text output to `-o` is also appended per
+target.
+
+### Rate Limiting and Concurrency
+
+```bash
+webhog scan --list hosts.txt --rate-limit 10 --concurrency 4 --parallel 2
+```
+
+- `--rate-limit N` caps the requests webhog originates at N per second across
+  the **whole run**: page fetches, script fetches in static mode, `robots.txt`
+  and headless navigations, over every worker and target. `--delay D` forces a
+  minimum spacing instead; the stricter of the two wins. Sub-resources Chrome
+  loads on its own during a headless navigation cannot be paced individually;
+  one navigation counts as one request.
+- `--concurrency N` (default 4) renders up to N pages of one target at once.
+- `--parallel N` (default 1) scans up to N targets at once. Live text output
+  is buffered per target and printed whole when it completes, so reports never
+  interleave; JSON Lines and file output stream as before.
+
+Raising either knob never raises the request rate above the ceiling, because
+the limiter sits underneath all of them.
 
 ### Crawl Multiple Pages
 
@@ -225,13 +300,21 @@ webhog scan --json https://example.com | jq '.findings[] | select(.type=="secret
 **Mode:**
 - `--headless`: Use headless browser rendering (default: false)
 - `--timeout`: Page load timeout (default: 30s)
+- `--dom-wait`: Headless only. Time to let a page settle after load before reading it (default: 3s; 0 = none)
+
+**Pacing:**
+- `--rate-limit`: Maximum requests per second webhog originates across the whole run (default: 0 = unlimited)
+- `--delay`: Minimum time between requests, e.g. `500ms` (default: 0)
+- `-c, --concurrency`: Pages rendered at once within a target (default: 4)
+- `-p, --parallel`: Targets scanned at once (default: 1)
 
 **Input:**
 - `-l, --list`: Read targets (one per line) from a file. Targets may also be passed as arguments or piped on stdin; bare hostnames default to `https://`.
 
 **Output:**
 - `-o, --output`: Write results to file
-- `--json`: Output results as JSON
+- `--json`: Output results as JSON (one object for a single target, an array for many, written when the run ends)
+- `--jsonl`: Output results as JSON Lines, one report per line written as each target completes
 - `--quiet`: Minimal output
 - `--plain`: Disable styled output
 
@@ -282,7 +365,9 @@ webhog/
 │   └── scan.go
 ├── internal/
 │   ├── renderer/        # Page rendering (static & headless)
-│   ├── crawler/         # Breadth-first multi-page crawling
+│   ├── crawler/         # Breadth-first multi-page crawling (worker pool)
+│   ├── ratelimit/       # Process-wide request pacing
+│   ├── version/         # Build version and commit
 │   ├── scanner/         # Secret detection (Regex & Entropy)
 │   ├── verifier/        # Live credential validation (--verify)
 │   ├── tech/            # Wappalyzer integration
@@ -315,7 +400,8 @@ webhog/
 
 ## Limitations
 
-- Crawling follows `<a href>` anchors and endpoints found via the scanner's regexes in JS/HTML, but not URLs assembled dynamically at runtime (e.g. string-concatenated paths); it crawls pages sequentially
+- Crawling follows `<a href>` anchors and endpoints found via the scanner's regexes in JS/HTML, but not URLs assembled dynamically at runtime (e.g. string-concatenated paths). Headless mode does pick up scripts and `fetch`/XHR responses the page requests at runtime.
+- The rate limiter paces requests webhog originates. The sub-resources Chrome loads by itself during a headless navigation are not individually paced.
 - Static mode doesn't execute JavaScript (use `--headless` for SPAs)
 - Headless mode requires more resources and time
 
@@ -323,10 +409,8 @@ webhog/
 
 Contributions are welcome! Areas for improvement:
 - Additional secret detectors and verifiers
-- Concurrent (parallel) crawling
 - Custom detector rules
-- Performance optimizations
-- Network request interception in headless mode
+- An automatic mode that scans statically and retries through the browser only when the response looks like bot management
 
 ## License
 

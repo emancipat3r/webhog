@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/user/webhog/internal/renderer"
+	"github.com/emancipat3r/webhog/internal/renderer"
 )
 
 // fakeRenderer serves canned HTML keyed by final URL, with no network access.
@@ -184,5 +186,112 @@ func TestSameRegisteredDomain(t *testing.T) {
 	}
 	if sameRegisteredDomain(seed, "https://evil.com/") {
 		t.Error("evil.com should not share example.com's registered domain")
+	}
+}
+
+// slowRenderer serves a wide, flat site where every page takes `delay` to
+// render, so the wall time of a crawl reveals how many pages ran at once.
+type slowRenderer struct {
+	delay time.Duration
+	width int
+	mu    sync.Mutex
+	inUse int
+	peak  int
+}
+
+func (s *slowRenderer) Render(ctx context.Context, u string) (*renderer.RenderResult, error) {
+	s.mu.Lock()
+	s.inUse++
+	if s.inUse > s.peak {
+		s.peak = s.inUse
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.inUse--
+		s.mu.Unlock()
+	}()
+
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	html := ""
+	if u == "http://example.test/" {
+		var b strings.Builder
+		for i := 0; i < s.width; i++ {
+			fmt.Fprintf(&b, `<a href="/p%d">x</a>`, i)
+		}
+		html = b.String()
+	}
+	return &renderer.RenderResult{URL: u, Status: 200, HTML: html}, nil
+}
+
+// TestCrawlConcurrencySpeedsUp is the PRD's acceptance test for concurrency:
+// a 40-page crawl at --concurrency 4 should take roughly a quarter of the
+// serial wall time, and never run more than 4 renders at once.
+func TestCrawlConcurrencySpeedsUp(t *testing.T) {
+	const pages, delay = 40, 20 * time.Millisecond
+
+	run := func(conc int) (time.Duration, int, int) {
+		r := &slowRenderer{delay: delay, width: pages - 1}
+		c := New(r, 1, 0, true, time.Second, nil).SetConcurrency(conc)
+		start := time.Now()
+		n := len(collect(c, "http://example.test/"))
+		return time.Since(start), n, r.peak
+	}
+
+	serial, n1, peak1 := run(1)
+	if n1 != pages || peak1 != 1 {
+		t.Fatalf("serial: crawled %d pages (want %d) with peak concurrency %d (want 1)", n1, pages, peak1)
+	}
+	parallel, n4, peak4 := run(4)
+	if n4 != pages {
+		t.Fatalf("concurrency 4: crawled %d pages, want %d", n4, pages)
+	}
+	if peak4 > 4 {
+		t.Errorf("concurrency 4: peak in-flight renders = %d, want <= 4", peak4)
+	}
+	if peak4 < 2 {
+		t.Errorf("concurrency 4: peak in-flight renders = %d, workers never overlapped", peak4)
+	}
+	// Serial: 40 * 20ms = 800ms. Parallel: ~1 + 39/4 rounds ≈ 220ms.
+	if parallel > serial/2 {
+		t.Errorf("concurrency 4 took %v vs serial %v; expected a large speedup", parallel, serial)
+	}
+}
+
+// TestCrawlMaxPagesIsExactUnderConcurrency checks that racing workers cannot
+// overshoot the page cap.
+func TestCrawlMaxPagesIsExactUnderConcurrency(t *testing.T) {
+	r := &slowRenderer{delay: time.Millisecond, width: 100}
+	c := New(r, 1, 7, true, time.Second, nil).SetConcurrency(8)
+	if n := len(collect(c, "http://example.test/")); n != 7 {
+		t.Errorf("maxPages=7 with 8 workers: rendered %d pages", n)
+	}
+}
+
+// TestCrawlCancellationStopsWorkers verifies that cancelling the context ends
+// the crawl promptly and closes the output channel.
+func TestCrawlCancellationStopsWorkers(t *testing.T) {
+	r := &slowRenderer{delay: 50 * time.Millisecond, width: 100}
+	c := New(r, 1, 0, true, time.Second, nil).SetConcurrency(4)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	pages := c.Crawl(ctx, "http://example.test/")
+	<-pages // seed rendered
+	cancel()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-pages:
+			if !ok {
+				return // channel closed: crawl ended
+			}
+		case <-deadline:
+			t.Fatal("crawl did not end after cancellation")
+		}
 	}
 }

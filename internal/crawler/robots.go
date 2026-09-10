@@ -8,7 +8,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/user/webhog/internal/renderer"
+	"github.com/emancipat3r/webhog/internal/renderer"
+	"github.com/emancipat3r/webhog/internal/version"
 )
 
 const maxRobotsBytes = 1 << 20 // 1 MiB
@@ -35,9 +36,12 @@ func RobotsTargets(ctx context.Context, seedURL string, client *http.Client, htt
 	if err != nil {
 		return nil
 	}
-	req.Header.Set("User-Agent", "webhog/0.1.0 (https://github.com/user/webhog)")
+	req.Header.Set("User-Agent", version.UserAgent())
 	httpCfg.Apply(req)
 
+	if err := httpCfg.Wait(ctx); err != nil {
+		return nil
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil

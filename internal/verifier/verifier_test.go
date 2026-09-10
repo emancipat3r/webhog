@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/user/webhog/internal/scanner"
+	"github.com/emancipat3r/webhog/internal/scanner"
 )
 
 func TestStatusFromCode(t *testing.T) {

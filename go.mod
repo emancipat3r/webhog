@@ -1,4 +1,4 @@
-module github.com/user/webhog
+module github.com/emancipat3r/webhog
 
 go 1.25.4
 

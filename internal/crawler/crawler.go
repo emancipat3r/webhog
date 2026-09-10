@@ -7,9 +7,10 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/user/webhog/internal/renderer"
+	"github.com/emancipat3r/webhog/internal/renderer"
 )
 
 // Page is the outcome of attempting to render one crawled URL.
@@ -29,33 +30,53 @@ type LinkFunc func(*renderer.RenderResult) []string
 // Crawler walks a site breadth-first from a seed URL, rendering each page with
 // the configured renderer.
 type Crawler struct {
-	renderer   renderer.Renderer
-	maxDepth   int           // 0 = seed only
-	maxPages   int           // 0 = unlimited
-	sameDomain bool          // restrict to the seed's registered (apex) domain
-	perPage    time.Duration // per-page render timeout
-	extraLinks LinkFunc      // optional source of additional crawl targets
+	renderer    renderer.Renderer
+	maxDepth    int           // 0 = seed only
+	maxPages    int           // 0 = unlimited
+	sameDomain  bool          // restrict to the seed's registered (apex) domain
+	perPage     time.Duration // per-page render timeout
+	extraLinks  LinkFunc      // optional source of additional crawl targets
+	concurrency int           // pages rendered at once (>= 1)
 }
 
 // New creates a Crawler. extraLinks may be nil, in which case only <a href>
-// anchors are followed.
+// anchors are followed. Pages are rendered one at a time; see SetConcurrency.
 func New(r renderer.Renderer, maxDepth, maxPages int, sameDomain bool, perPage time.Duration, extraLinks LinkFunc) *Crawler {
 	return &Crawler{
-		renderer:   r,
-		maxDepth:   maxDepth,
-		maxPages:   maxPages,
-		sameDomain: sameDomain,
-		perPage:    perPage,
-		extraLinks: extraLinks,
+		renderer:    r,
+		maxDepth:    maxDepth,
+		maxPages:    maxPages,
+		sameDomain:  sameDomain,
+		perPage:     perPage,
+		extraLinks:  extraLinks,
+		concurrency: 1,
 	}
+}
+
+// SetConcurrency sets how many pages of this crawl are rendered at once.
+// Values below 1 are treated as 1. Request pacing is not the crawler's job:
+// the renderer's rate limiter applies across all workers, so raising
+// concurrency never raises the request rate above the configured ceiling.
+func (c *Crawler) SetConcurrency(n int) *Crawler {
+	if n < 1 {
+		n = 1
+	}
+	c.concurrency = n
+	return c
 }
 
 // Crawl renders the given seeds and, up to maxDepth/maxPages, the pages
 // reachable from them (via anchors and any extraLinks), emitting one Page per
-// rendered URL on the returned channel in breadth-first order. All seeds start
-// at depth 0; the first seed defines the registered-domain scope. Each render
-// is bounded by its own perPage timeout. The channel is closed when the crawl
-// finishes or ctx is cancelled.
+// rendered URL on the returned channel. All seeds start at depth 0; the first
+// seed defines the registered-domain scope. Each render is bounded by its own
+// perPage timeout. The channel is closed when the crawl finishes or ctx is
+// cancelled.
+//
+// Order is breadth-first: with one worker exactly so, with several workers
+// approximately so, because pages finish rendering at different times. The
+// frontier is expanded from a page's links as soon as that page is back, and
+// maxPages counts pages dispatched, so the cap is exact even with workers
+// racing for it.
 func (c *Crawler) Crawl(ctx context.Context, seeds ...string) <-chan Page {
 	out := make(chan Page)
 
@@ -67,11 +88,6 @@ func (c *Crawler) Crawl(ctx context.Context, seeds ...string) <-chan Page {
 		}
 		seedDomain := registeredDomain(seeds[0])
 
-		type item struct {
-			url   string
-			depth int
-		}
-
 		var queue []item
 		visited := make(map[string]bool)
 		for _, s := range seeds {
@@ -81,57 +97,101 @@ func (c *Crawler) Crawl(ctx context.Context, seeds ...string) <-chan Page {
 				queue = append(queue, item{url: n, depth: 0})
 			}
 		}
-		pages := 0
 
-		for len(queue) > 0 {
-			if c.maxPages > 0 && pages >= c.maxPages {
-				return
+		// Workers render; the coordinator (this goroutine) owns the queue and
+		// the visited set, so no locking is needed on either.
+		tasks := make(chan item)
+		results := make(chan rendered)
+		var wg sync.WaitGroup
+		for i := 0; i < c.concurrency; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c.worker(ctx, tasks, results, out)
+			}()
+		}
+		defer func() {
+			close(tasks)
+			wg.Wait()
+		}()
+
+		dispatched, inflight := 0, 0
+		for len(queue) > 0 || inflight > 0 {
+			// Only offer a task when there is one and the page cap allows it.
+			var next item
+			var offer chan<- item
+			if len(queue) > 0 && (c.maxPages <= 0 || dispatched < c.maxPages) {
+				next = queue[0]
+				offer = tasks
+			} else if inflight == 0 {
+				return // cap reached (or queue drained) and nothing outstanding
 			}
-
-			cur := queue[0]
-			queue = queue[1:]
 
 			select {
 			case <-ctx.Done():
 				return
-			default:
-			}
-
-			pctx, cancel := context.WithTimeout(ctx, c.perPage)
-			result, err := c.renderer.Render(pctx, cur.url)
-			cancel()
-			pages++
-
-			select {
-			case out <- Page{URL: cur.url, Depth: cur.depth, Result: result, Err: err}:
-			case <-ctx.Done():
-				return
-			}
-
-			if err != nil || result == nil {
-				continue
-			}
-
-			// Mark the post-redirect URL visited too, so a redirect target
-			// reached again (directly or via a link back) is not re-fetched.
-			visited[normalizeURL(result.URL)] = true
-
-			if cur.depth >= c.maxDepth {
-				continue
-			}
-
-			for _, link := range c.candidates(result) {
-				n, ok := c.inScope(seedDomain, result.URL, link)
-				if !ok || visited[n] {
+			case offer <- next:
+				queue = queue[1:]
+				dispatched++
+				inflight++
+			case r := <-results:
+				inflight--
+				if r.err != nil || r.result == nil {
 					continue
 				}
-				visited[n] = true
-				queue = append(queue, item{url: n, depth: cur.depth + 1})
+				// Mark the post-redirect URL visited too, so a redirect target
+				// reached again (directly or via a link back) is not re-fetched.
+				visited[normalizeURL(r.result.URL)] = true
+				if r.depth >= c.maxDepth {
+					continue
+				}
+				for _, link := range c.candidates(r.result) {
+					n, ok := c.inScope(seedDomain, r.result.URL, link)
+					if !ok || visited[n] {
+						continue
+					}
+					visited[n] = true
+					queue = append(queue, item{url: n, depth: r.depth + 1})
+				}
 			}
 		}
 	}()
 
 	return out
+}
+
+// item is a queued crawl target.
+type item struct {
+	url   string
+	depth int
+}
+
+// rendered is a worker's report back to the coordinator.
+type rendered struct {
+	depth  int
+	result *renderer.RenderResult
+	err    error
+}
+
+// worker renders tasks until the channel closes or ctx ends, emitting each
+// page to out and reporting it to the coordinator so the frontier can grow.
+func (c *Crawler) worker(ctx context.Context, tasks <-chan item, results chan<- rendered, out chan<- Page) {
+	for cur := range tasks {
+		pctx, cancel := context.WithTimeout(ctx, c.perPage)
+		result, err := c.renderer.Render(pctx, cur.url)
+		cancel()
+
+		select {
+		case out <- Page{URL: cur.url, Depth: cur.depth, Result: result, Err: err}:
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case results <- rendered{depth: cur.depth, result: result, err: err}:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // candidates gathers the raw link candidates from a page: its anchors plus any

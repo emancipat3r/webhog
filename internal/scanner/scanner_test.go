@@ -3,7 +3,7 @@ package scanner
 import (
 	"testing"
 
-	"github.com/user/webhog/internal/renderer"
+	"github.com/emancipat3r/webhog/internal/renderer"
 )
 
 // TestLoadedFromProvenance verifies the loaded_from field: secrets matched in an

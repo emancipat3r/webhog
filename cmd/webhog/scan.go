@@ -2,21 +2,26 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/emancipat3r/webhog/internal/crawler"
+	"github.com/emancipat3r/webhog/internal/ratelimit"
+	"github.com/emancipat3r/webhog/internal/renderer"
+	"github.com/emancipat3r/webhog/internal/scanner"
+	"github.com/emancipat3r/webhog/internal/tech"
+	"github.com/emancipat3r/webhog/internal/ui"
+	"github.com/emancipat3r/webhog/internal/verifier"
+	"github.com/emancipat3r/webhog/internal/version"
 	"github.com/spf13/cobra"
-	"github.com/user/webhog/internal/crawler"
-	"github.com/user/webhog/internal/renderer"
-	"github.com/user/webhog/internal/scanner"
-	"github.com/user/webhog/internal/tech"
-	"github.com/user/webhog/internal/ui"
-	"github.com/user/webhog/internal/verifier"
 )
 
 var scanCmd = &cobra.Command{
@@ -38,6 +43,7 @@ func init() {
 	// Mode flags
 	scanCmd.Flags().BoolVar(&cfg.Headless, "headless", false, "use headless browser rendering")
 	scanCmd.Flags().DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "page load timeout")
+	scanCmd.Flags().DurationVar(&cfg.DOMWait, "dom-wait", renderer.DefaultDOMWait, "headless: time to let a page settle after load before reading it (0 = none)")
 
 	// Input flags
 	scanCmd.Flags().StringVarP(&cfg.ListFile, "list", "l", "", "read targets (one per line) from a file")
@@ -48,8 +54,19 @@ func init() {
 	scanCmd.Flags().BoolVar(&cfg.SameDomain, "same-domain", true, "restrict the crawl to the seed's registered (apex) domain; set to false to follow off-domain links too")
 	scanCmd.Flags().BoolVar(&cfg.Robots, "robots", false, "use robots.txt as an enumeration source: scan its Disallow/Allow paths and Sitemap URLs (does NOT honor crawl restrictions)")
 
+	// Pacing flags. The limiter is process-wide: it covers every request webhog
+	// originates (pages, scripts in static mode, robots.txt, headless
+	// navigations) across all workers and targets, so raising concurrency never
+	// raises the request rate above the ceiling. Sub-resources the browser
+	// loads on its own during a navigation are not individually limited.
+	scanCmd.Flags().Float64Var(&cfg.RateLimit, "rate-limit", 0, "maximum requests per second across the whole run (0 = unlimited)")
+	scanCmd.Flags().DurationVar(&cfg.Delay, "delay", 0, "minimum time between requests, e.g. 500ms (0 = none)")
+	scanCmd.Flags().IntVarP(&cfg.Concurrency, "concurrency", "c", 4, "pages rendered at once within a target")
+	scanCmd.Flags().IntVarP(&cfg.Parallel, "parallel", "p", 1, "targets scanned at once (live text output is buffered per target when > 1)")
+
 	// Output flags
-	scanCmd.Flags().BoolVar(&cfg.JSONOutput, "json", false, "output results as JSON")
+	scanCmd.Flags().BoolVar(&cfg.JSONOutput, "json", false, "output results as JSON (one object for a single target, an array for many, written when the run ends)")
+	scanCmd.Flags().BoolVar(&cfg.JSONL, "jsonl", false, "output results as JSON Lines: one report per line, written as each target completes")
 	scanCmd.Flags().BoolVar(&cfg.Quiet, "quiet", false, "minimal output")
 	scanCmd.Flags().BoolVar(&cfg.PlainOutput, "plain", false, "disable styled output")
 	scanCmd.Flags().StringVarP(&cfg.OutputFile, "output", "o", "", "write results to file")
@@ -67,83 +84,233 @@ func init() {
 	scanCmd.Flags().IntVar(&cfg.MinLength, "min-length", 20, "minimum token length for detection")
 }
 
+// limiter is the process-wide request pacer, built from --rate-limit and
+// --delay at the start of a scan and shared by every renderer and target.
+var limiter *ratelimit.Limiter
+
 func runScan(cmd *cobra.Command, args []string) error {
 	targets, err := collectTargets(args)
 	if err != nil {
 		return err
 	}
+	limiter = ratelimit.New(cfg.RateLimit, cfg.Delay)
 
 	// Renderer and tech detector are created once and reused across targets.
-	// Per-page timeouts are applied by the crawler, so the base context carries
-	// no overall deadline.
+	// In headless mode that means one Chromium process for the whole run,
+	// launched on first use and shut down when the scan ends; each target gets
+	// its own incognito context inside it (see scanOne). Per-page timeouts are
+	// applied by the crawler, so the base context carries no overall deadline.
 	httpCfg := buildHTTPConfig()
 	var r renderer.Renderer
 	if cfg.Headless {
-		r = renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg)
+		hr := renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg).SetDOMWait(cfg.DOMWait)
+		defer hr.Close()
+		r = hr
 	} else {
 		r = renderer.NewStaticRenderer(cfg.Timeout, httpCfg)
 	}
 	detector, _ := tech.NewDetector()
 
-	// File outputter (if needed). File output is always plain text and never quiet.
-	var fileOutputter *ui.Outputter
-	var file *os.File
-	if cfg.OutputFile != "" {
-		f, err := os.Create(cfg.OutputFile)
-		if err != nil {
-			return fmt.Errorf("failed to create output file: %w", err)
-		}
-		defer f.Close()
-		file = f
-		fileOutputter = ui.NewOutputter(true, cfg.JSONOutput, false)
+	sink, err := newReportSink()
+	if err != nil {
+		return err
 	}
+	defer sink.close()
 
 	multi := len(targets) > 1
-	var reports []*ui.Report
-
-	for i, target := range targets {
-		if multi && !cfg.JSONOutput && !cfg.Quiet {
-			fmt.Fprintf(os.Stdout, "\n%s\n[%d/%d] %s\n%s\n",
-				strings.Repeat("═", 60), i+1, len(targets), target, strings.Repeat("═", 60))
-		}
-
-		report, err := scanOne(r, detector, target)
-		if err != nil {
-			// In multi-target mode one bad host shouldn't abort the run.
-			if !multi {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "scan failed for %s: %v\n", target, err)
-			continue
-		}
-		reports = append(reports, report)
+	parallel := cfg.Parallel
+	if parallel < 1 {
+		parallel = 1
+	}
+	if parallel > len(targets) {
+		parallel = len(targets)
 	}
 
-	if len(reports) == 0 {
+	// Targets are scanned by a bounded pool. With one worker, text output
+	// streams live exactly as before. With more, each target's text is
+	// buffered and flushed whole when it completes, so reports never
+	// interleave. Reports go to the sink as they finish in either case.
+	var (
+		mu                sync.Mutex
+		succeeded, failed int
+		firstErr          error
+		wg                sync.WaitGroup
+		sem               = make(chan struct{}, parallel)
+	)
+	for i, target := range targets {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, target string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			var w io.Writer = os.Stdout
+			var buf *bytes.Buffer
+			if parallel > 1 {
+				buf = &bytes.Buffer{}
+				w = buf
+			}
+			if multi && !jsonMode() && !cfg.Quiet {
+				fmt.Fprintf(w, "\n%s\n[%d/%d] %s\n%s\n",
+					strings.Repeat("═", 60), i+1, len(targets), target, strings.Repeat("═", 60))
+			}
+
+			report, err := scanOne(w, r, detector, target)
+			if err != nil {
+				// A failed target still gets a report (with Error set) so the
+				// output shows coverage, not just findings. In multi-target
+				// mode one bad host shouldn't abort the run.
+				fmt.Fprintf(os.Stderr, "scan failed for %s: %v\n", target, err)
+				report = &ui.Report{Webhog: version.String(), URL: target, Error: err.Error()}
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if buf != nil {
+				_, _ = os.Stdout.Write(buf.Bytes())
+			}
+			if err != nil {
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				succeeded++
+			}
+			if emitErr := sink.emit(report); emitErr != nil && firstErr == nil {
+				firstErr = emitErr
+			}
+		}(i, target)
+	}
+	wg.Wait()
+
+	if err := sink.finish(); err != nil {
+		return err
+	}
+	if !multi && failed > 0 {
+		return firstErr
+	}
+	if multi && failed > 0 {
+		fmt.Fprintf(os.Stderr, "%d of %d targets failed\n", failed, len(targets))
+	}
+	if succeeded == 0 {
 		return fmt.Errorf("no targets could be scanned")
 	}
-
-	// Write all reports to the output file, if requested.
-	if fileOutputter != nil {
-		if err := fileOutputter.OutputReports(file, reports); err != nil {
-			return fmt.Errorf("writing output file: %w", err)
-		}
-	}
-
-	// Non-JSON output was streamed per target already; JSON is emitted at the end
-	// (a single object for one target, an array for many).
-	if cfg.JSONOutput {
-		out := ui.NewOutputter(cfg.NoColor || cfg.PlainOutput, true, cfg.Quiet)
-		return out.OutputReports(os.Stdout, reports)
-	}
-
 	return nil
 }
 
-// scanOne crawls and scans a single target, streaming findings live (for
+// jsonMode reports whether stdout carries machine-readable output (--json or
+// --jsonl), in which case no live text is streamed.
+func jsonMode() bool {
+	return cfg.JSONOutput || cfg.JSONL
+}
+
+// reportSink routes completed reports to stdout and the optional output file.
+//
+// Everything that can be written incrementally is: JSON Lines go out one line
+// per target the moment it finishes, and the text output file is appended per
+// target. Only --json (a single array) has to wait for the end, because the
+// array is not valid until it is closed. A run killed part-way therefore
+// leaves every completed target on disk in every mode but --json.
+type reportSink struct {
+	mu   sync.Mutex
+	file *os.File
+
+	fileOut   *ui.Outputter // text or JSON view for the file, nil without -o
+	stdoutOut *ui.Outputter // JSON view for stdout, nil for text mode
+
+	retained []*ui.Report // --json only: collected for the closing array
+	written  int          // reports already appended to the text file
+}
+
+func newReportSink() (*reportSink, error) {
+	s := &reportSink{}
+	if cfg.OutputFile != "" {
+		f, err := os.Create(cfg.OutputFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create output file: %w", err)
+		}
+		s.file = f
+		// File output is always plain text and never quiet.
+		s.fileOut = ui.NewOutputter(true, jsonMode(), false)
+	}
+	if jsonMode() {
+		s.stdoutOut = ui.NewOutputter(cfg.NoColor || cfg.PlainOutput, true, cfg.Quiet)
+	}
+	return s, nil
+}
+
+// emit records one finished target. Text was already streamed to stdout by
+// scanOne, so stdout only needs the machine-readable forms here.
+func (s *reportSink) emit(r *ui.Report) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	switch {
+	case cfg.JSONL:
+		if err := s.stdoutOut.OutputJSONL(os.Stdout, r); err != nil {
+			return err
+		}
+		if s.file != nil {
+			if err := s.fileOut.OutputJSONL(s.file, r); err != nil {
+				return fmt.Errorf("writing output file: %w", err)
+			}
+		}
+	case cfg.JSONOutput:
+		s.retained = append(s.retained, r)
+	default:
+		if s.file != nil {
+			if s.written > 0 {
+				fmt.Fprintln(s.file)
+			}
+			s.written++
+			if err := s.fileOut.Output(s.file, r); err != nil {
+				return fmt.Errorf("writing output file: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// finish writes whatever could not be streamed: the --json array.
+func (s *reportSink) finish() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !cfg.JSONOutput || len(s.retained) == 0 {
+		return nil
+	}
+	if s.file != nil {
+		if err := s.fileOut.OutputReports(s.file, s.retained); err != nil {
+			return fmt.Errorf("writing output file: %w", err)
+		}
+	}
+	err := s.stdoutOut.OutputReports(os.Stdout, s.retained)
+	s.retained = nil
+	return err
+}
+
+func (s *reportSink) close() {
+	if s.file != nil {
+		_ = s.file.Close()
+	}
+}
+
+// scanOne crawls and scans a single target, streaming findings to w (for
 // non-JSON output) and returning the aggregated report.
-func scanOne(r renderer.Renderer, detector *tech.Detector, target string) (*ui.Report, error) {
-	outputter := ui.NewOutputter(cfg.NoColor || cfg.PlainOutput, cfg.JSONOutput, cfg.Quiet)
+func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target string) (*ui.Report, error) {
+	outputter := ui.NewOutputter(cfg.NoColor || cfg.PlainOutput, jsonMode(), cfg.Quiet)
+
+	// Isolate this target from the others: a session-capable renderer (the
+	// headless one) gets a fresh browser context, so cookies and storage set by
+	// one host are never presented to the next.
+	if sr, ok := r.(renderer.Sessioner); ok {
+		session, err := sr.NewSession()
+		if err != nil {
+			return nil, fmt.Errorf("starting browser session: %w", err)
+		}
+		defer session.Close()
+		r = session
+	}
 
 	// The crawl frontier is expanded with both <a href> anchors and the
 	// endpoints the scanner discovers inside JavaScript/HTML, so additional
@@ -152,7 +319,8 @@ func scanOne(r renderer.Renderer, detector *tech.Detector, target string) (*ui.R
 	discoverEndpoints := func(res *renderer.RenderResult) []string {
 		return endpointScanner.ExtractEndpoints(res)
 	}
-	c := crawler.New(r, cfg.MaxDepth, cfg.MaxPages, cfg.SameDomain, cfg.Timeout, discoverEndpoints)
+	c := crawler.New(r, cfg.MaxDepth, cfg.MaxPages, cfg.SameDomain, cfg.Timeout, discoverEndpoints).
+		SetConcurrency(cfg.Concurrency)
 
 	// Build the seed list. With --robots, robots.txt is mined for paths to scan
 	// (Disallow/Allow entries and Sitemap URLs) and added as seeds, so they are
@@ -171,6 +339,7 @@ func scanOne(r renderer.Renderer, detector *tech.Detector, target string) (*ui.R
 		firstErr     error
 		pagesCrawled int
 		totalJSBlobs int
+		totalRefused int
 		techSet      = make(map[string]bool)
 	)
 
@@ -195,14 +364,18 @@ func scanOne(r renderer.Renderer, detector *tech.Detector, target string) (*ui.R
 				seedResult = page.Result
 			}
 			totalJSBlobs += len(page.Result.JSBlobs)
+			totalRefused += page.Result.Refused()
 			if detector != nil {
 				for _, t := range detector.Analyze(page.Result.Headers, []byte(page.Result.HTML)) {
 					techSet[t] = true
 				}
 			}
 			if cfg.Verbose && !cfg.Quiet {
-				fmt.Fprintf(os.Stderr, "[depth %d] %s (HTTP %d, %d JS blobs)\n",
-					page.Depth, page.Result.URL, page.Result.Status, len(page.Result.JSBlobs))
+				fmt.Fprintf(os.Stderr, "[depth %d] %s (HTTP %d, %d JS blobs, %d refused)\n",
+					page.Depth, page.Result.URL, page.Result.Status, len(page.Result.JSBlobs), page.Result.Refused())
+				for _, re := range page.Result.Errors {
+					fmt.Fprintf(os.Stderr, "  could not fetch %s: %s\n", re.URL, re.Err)
+				}
 			}
 
 			s.ScanStream(page.Result, findingsChan)
@@ -222,7 +395,7 @@ func scanOne(r renderer.Renderer, detector *tech.Detector, target string) (*ui.R
 	// non-JSON output), and returns the deduplicated set. It returns only after
 	// the scan goroutine has closed the channel, so the aggregate counters are
 	// safe to read below.
-	displayFindings := outputter.StreamOutput(os.Stdout, outChan)
+	displayFindings := outputter.StreamOutput(w, outChan)
 
 	if pagesCrawled == 0 {
 		if firstErr != nil {
@@ -232,17 +405,19 @@ func scanOne(r renderer.Renderer, detector *tech.Detector, target string) (*ui.R
 	}
 
 	report := &ui.Report{
+		Webhog:       version.String(),
 		URL:          seedResult.URL,
 		Status:       seedResult.Status,
 		PagesCrawled: pagesCrawled,
 		JSBlobs:      totalJSBlobs,
+		JSRefused:    totalRefused,
 		Technologies: sortedKeys(techSet),
 		Findings:     displayFindings,
 	}
 
 	// For non-JSON output, print this target's summary box now.
-	if !cfg.JSONOutput && !cfg.Quiet {
-		outputter.PrintSummary(os.Stdout, report)
+	if !jsonMode() && !cfg.Quiet {
+		outputter.PrintSummary(w, report)
 	}
 
 	return report, nil
@@ -253,7 +428,10 @@ func scanOne(r renderer.Renderer, detector *tech.Detector, target string) (*ui.R
 // Value", split on the first colon; malformed entries (no colon or an empty key)
 // are reported and skipped rather than aborting the scan.
 func buildHTTPConfig() renderer.HTTPConfig {
-	hc := renderer.HTTPConfig{UserAgent: strings.TrimSpace(cfg.UserAgent)}
+	hc := renderer.HTTPConfig{
+		UserAgent: strings.TrimSpace(cfg.UserAgent),
+		Limiter:   limiter,
+	}
 	for _, raw := range cfg.Headers {
 		key, value, found := strings.Cut(raw, ":")
 		key = strings.TrimSpace(key)
