@@ -295,3 +295,35 @@ func TestCrawlCancellationStopsWorkers(t *testing.T) {
 		}
 	}
 }
+
+// TestCrawlRedirectOffDomainDoesNotCrawlLanding is the fixture from the
+// surfacer scope report: a seed that redirects to a different registrable
+// domain whose landing page carries links. Fetching the seed through the
+// redirect is in scope; crawling what it lands on is not. Exactly one page
+// may be fetched and no landing-page link may be enqueued.
+func TestCrawlRedirectOffDomainDoesNotCrawlLanding(t *testing.T) {
+	var landing strings.Builder
+	for i := 0; i < 10; i++ {
+		fmt.Fprintf(&landing, `<a href="/l%d">x</a><a href="https://other.test/abs%d">y</a>`, i, i)
+	}
+	pages := map[string]string{"https://other.test/landing": landing.String()}
+	for i := 0; i < 10; i++ {
+		pages[fmt.Sprintf("https://other.test/l%d", i)] = "leaf"
+		pages[fmt.Sprintf("https://other.test/abs%d", i)] = "leaf"
+	}
+	fake := &fakeRenderer{
+		redirects: map[string]string{"https://seed.test/": "https://other.test/landing"},
+		pages:     pages,
+	}
+	extra := func(res *renderer.RenderResult) []string {
+		return []string{"/api/from-js", "https://other.test/js-abs"} // endpoints "found" in page text
+	}
+	c := New(fake, 3, 0, true, time.Second, extra).SetConcurrency(4)
+	got := collect(c, "https://seed.test/")
+	if len(got) != 1 || got[0] != "https://other.test/landing" {
+		t.Fatalf("expected exactly the landing page, got %v", got)
+	}
+	if len(fake.requested) != 1 {
+		t.Errorf("requested %d URLs, want 1 (seed only): %v", len(fake.requested), fake.requested)
+	}
+}

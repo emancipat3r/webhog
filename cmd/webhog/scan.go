@@ -161,7 +161,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 				// output shows coverage, not just findings. In multi-target
 				// mode one bad host shouldn't abort the run.
 				fmt.Fprintf(os.Stderr, "scan failed for %s: %v\n", target, err)
-				report = &ui.Report{Webhog: version.String(), URL: target, Error: err.Error()}
+				report = &ui.Report{Webhog: version.String(), Seed: target, URL: target, Error: err.Error()}
 			}
 
 			mu.Lock()
@@ -404,15 +404,27 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		return nil, fmt.Errorf("no pages could be scanned")
 	}
 
+	// A seed that lands on another registered domain (an SSO front, say) is
+	// still fetched, because that is where the seed leads, but the crawler
+	// never follows the landing page's links. Record the boundary crossing:
+	// it is a real observation about the target and it explains why the
+	// report's URL names a host the caller did not ask for.
+	offScope := cfg.SameDomain && !crawler.SameScope(target, seedResult.URL)
+	if offScope && !cfg.Quiet {
+		fmt.Fprintf(os.Stderr, "%s redirected off scope to %s: landing page scanned, its links not crawled\n", target, seedResult.URL)
+	}
+
 	report := &ui.Report{
-		Webhog:       version.String(),
-		URL:          seedResult.URL,
-		Status:       seedResult.Status,
-		PagesCrawled: pagesCrawled,
-		JSBlobs:      totalJSBlobs,
-		JSRefused:    totalRefused,
-		Technologies: sortedKeys(techSet),
-		Findings:     displayFindings,
+		Webhog:             version.String(),
+		Seed:               target,
+		URL:                seedResult.URL,
+		RedirectedOffScope: offScope,
+		Status:             seedResult.Status,
+		PagesCrawled:       pagesCrawled,
+		JSBlobs:            totalJSBlobs,
+		JSRefused:          totalRefused,
+		Technologies:       sortedKeys(techSet),
+		Findings:           displayFindings,
 	}
 
 	// For non-JSON output, print this target's summary box now.

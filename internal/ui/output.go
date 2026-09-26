@@ -15,15 +15,21 @@ import (
 // be scanned at all still produces a Report, with Error set and every other
 // field zero, so a consumer can tell "nothing found" from "never looked".
 type Report struct {
-	Webhog       string            `json:"webhog"`          // build that produced this report (version and commit)
-	URL          string            `json:"url"`             // seed URL
-	Error        string            `json:"error,omitempty"` // why the target could not be scanned (empty on success)
-	Status       int               `json:"status"`          // seed HTTP status (0 if unknown)
-	PagesCrawled int               `json:"pages_crawled"`   // number of pages successfully scanned
-	JSBlobs      int               `json:"js_blobs"`        // total JS blobs across all pages
-	JSRefused    int               `json:"js_refused"`      // external resources that failed to load or returned 4xx/5xx
-	Technologies []string          `json:"technologies"`    // union of detected technologies
-	Findings     []scanner.Finding `json:"findings"`        // deduplicated findings
+	Webhog string `json:"webhog"`          // build that produced this report (version and commit)
+	Seed   string `json:"seed"`            // target exactly as given
+	URL    string `json:"url"`             // final URL of the seed page, after redirects
+	Error  string `json:"error,omitempty"` // why the target could not be scanned (empty on success)
+	// RedirectedOffScope is true when the seed redirected to a different
+	// registered domain (typically an SSO front such as accounts.google.com).
+	// The landing page was fetched and scanned because it is where the seed
+	// leads, but none of its links were crawled.
+	RedirectedOffScope bool              `json:"redirected_off_scope,omitempty"`
+	Status             int               `json:"status"`        // seed HTTP status (0 if unknown)
+	PagesCrawled       int               `json:"pages_crawled"` // number of pages successfully scanned
+	JSBlobs            int               `json:"js_blobs"`      // total JS blobs across all pages
+	JSRefused          int               `json:"js_refused"`    // external resources that failed to load or returned 4xx/5xx
+	Technologies       []string          `json:"technologies"`  // union of detected technologies
+	Findings           []scanner.Finding `json:"findings"`      // deduplicated findings
 }
 
 // Outputter handles formatting and displaying results
@@ -184,6 +190,12 @@ func (o *Outputter) outputPlain(w io.Writer, report *Report) error {
 	findings := report.Findings
 	if !o.quiet {
 		fmt.Fprintf(w, "Scanned: %s\n", report.URL)
+		if report.Seed != "" && report.Seed != report.URL {
+			fmt.Fprintf(w, "Seed: %s\n", report.Seed)
+		}
+		if report.RedirectedOffScope {
+			fmt.Fprintln(w, "Redirected off scope: landing page scanned, its links not crawled")
+		}
 		if report.Status > 0 {
 			fmt.Fprintf(w, "Status: %d\n", report.Status)
 		}
@@ -288,6 +300,12 @@ func (o *Outputter) buildSummary(report *Report) string {
 	var b strings.Builder
 
 	b.WriteString(fmt.Sprintf("URL: %s\n", report.URL))
+	if report.Seed != "" && report.Seed != report.URL {
+		b.WriteString(fmt.Sprintf("Seed: %s\n", report.Seed))
+	}
+	if report.RedirectedOffScope {
+		b.WriteString("Redirected off scope: landing page scanned, its links not crawled\n")
+	}
 	if report.Status > 0 {
 		b.WriteString(fmt.Sprintf("Status: %d\n", report.Status))
 	}

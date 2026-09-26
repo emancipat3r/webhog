@@ -195,7 +195,13 @@ Crawling expands the frontier two ways:
 
 The crawl is scoped to the seed's **registered (apex) domain** by default, so
 `api.example.com` and `www.example.com` are in scope but third-party hosts are
-not. Pass `--same-domain=false` to follow off-domain links as well (noisier).
+not. The anchor is the seed **as given** and never moves: if a seed redirects
+to another domain (an SSO front such as `accounts.google.com` is the common
+case), the landing page is fetched and scanned because that is where the seed
+leads, but none of its links are crawled. The report records this with
+`redirected_off_scope: true`, carries the original target in `seed` alongside
+the post-redirect `url`, and a warning is printed. Pass `--same-domain=false`
+to follow off-domain links as well (noisier).
 Redirect targets are de-duplicated (and redirect chains are bounded), and
 `--max-pages` (default 200) caps the total crawl size.
 

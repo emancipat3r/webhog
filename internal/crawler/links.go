@@ -63,6 +63,14 @@ func sameRegisteredDomain(seedDomain, raw string) bool {
 	return seedDomain != "" && registeredDomain(raw) == seedDomain
 }
 
+// SameScope reports whether two URLs share a registered (apex) domain, the
+// same test the crawler applies to every candidate link under --same-domain.
+// Callers use it to notice when a seed's final URL, after redirects, has left
+// the seed's scope.
+func SameScope(a, b string) bool {
+	return sameRegisteredDomain(registeredDomain(a), b)
+}
+
 // anchorHrefs returns the raw href values of <a> elements in the HTML, skipping
 // empty and pure-fragment hrefs. Resolution, scheme filtering, and
 // deduplication are handled by the crawler so anchors and discovered endpoints
