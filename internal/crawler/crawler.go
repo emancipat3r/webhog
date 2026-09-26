@@ -145,6 +145,15 @@ func (c *Crawler) Crawl(ctx context.Context, seeds ...string) <-chan Page {
 				if r.depth >= c.maxDepth {
 					continue
 				}
+				// A page that redirected out of scope is a leaf. Its links
+				// are not enqueued even when they point back into scope:
+				// an SSO front's login page carries "continue" URLs for the
+				// in-scope app, and following them only bounces through the
+				// same front again, once per URL, without reaching new
+				// in-scope content.
+				if c.sameDomain && !sameRegisteredDomain(seedDomain, r.result.URL) {
+					continue
+				}
 				for _, link := range c.candidates(r.result) {
 					n, ok := c.inScope(seedDomain, r.result.URL, link)
 					if !ok || visited[n] {

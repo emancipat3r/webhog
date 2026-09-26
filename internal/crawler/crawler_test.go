@@ -315,9 +315,14 @@ func TestCrawlRedirectOffDomainDoesNotCrawlLanding(t *testing.T) {
 		redirects: map[string]string{"https://seed.test/": "https://other.test/landing"},
 		pages:     pages,
 	}
+	// Endpoints "found" in the landing page text, including in-scope ones such
+	// as the continue= URLs an SSO login page carries for the app behind it.
+	// The landing page is out of scope, so even those must not be followed.
 	extra := func(res *renderer.RenderResult) []string {
-		return []string{"/api/from-js", "https://other.test/js-abs"} // endpoints "found" in page text
+		return []string{"/api/from-js", "https://other.test/js-abs", "https://seed.test/continue", "https://app.seed.test/"}
 	}
+	pages["https://seed.test/continue"] = "leaf"
+	pages["https://app.seed.test/"] = "leaf"
 	c := New(fake, 3, 0, true, time.Second, extra).SetConcurrency(4)
 	got := collect(c, "https://seed.test/")
 	if len(got) != 1 || got[0] != "https://other.test/landing" {

@@ -198,7 +198,10 @@ The crawl is scoped to the seed's **registered (apex) domain** by default, so
 not. The anchor is the seed **as given** and never moves: if a seed redirects
 to another domain (an SSO front such as `accounts.google.com` is the common
 case), the landing page is fetched and scanned because that is where the seed
-leads, but none of its links are crawled. The report records this with
+leads, but none of its links are crawled, not even ones pointing back into
+scope (an SSO login page carries `continue=` URLs for the in-scope app, and
+following them only bounces through the same front again). The report records
+this with
 `redirected_off_scope: true`, carries the original target in `seed` alongside
 the post-redirect `url`, and a warning is printed. Pass `--same-domain=false`
 to follow off-domain links as well (noisier).
