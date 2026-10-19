@@ -153,25 +153,34 @@ func GetDetectors() []Detector {
 		// Generic detectors accept an optional closing quote after the key name
 		// and an optional opening quote before the value, so they match
 		// env-style (api_key=VALUE) and JSON-style ("api_key":"VALUE") alike.
+		//
+		// The separator must contain an assignment operator (: or =). With
+		// whitespace alone accepted, `<input type="password" placeholder="x">`
+		// read as the keyword `password` followed by the value `placeholder=`,
+		// and every attribute after a password input became a finding
+		// (placeholder=, required=, novalidate=, ng-model=, autocomplete=).
+		// Nothing assigns a value with a space; a key/value pair has an
+		// operator, and a bare keyword followed by another word is prose or
+		// markup.
 		{
 			Name: "Generic API Key",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(?i)api[_-]?key["\']?[\s:=]+["\']?([A-Za-z0-9\-_]{20,})`),
+			Re:   regexp.MustCompile(`(?i)api[_-]?key["\']?[\s:=]*[:=][\s:=]*["\']?([A-Za-z0-9\-_]{20,})`),
 		},
 		{
 			Name: "Generic Token",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(?i)(?:token|auth)["\']?[\s:=]+["\']?([A-Za-z0-9\-_\.]{20,})`),
+			Re:   regexp.MustCompile(`(?i)(?:token|auth)["\']?[\s:=]*[:=][\s:=]*["\']?([A-Za-z0-9\-_\.]{20,})`),
 		},
 		{
 			Name: "Generic Secret",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(?i)secret["\']?[\s:=]+["\']?([A-Za-z0-9\-_]{20,})`),
+			Re:   regexp.MustCompile(`(?i)secret["\']?[\s:=]*[:=][\s:=]*["\']?([A-Za-z0-9\-_]{20,})`),
 		},
 		{
 			Name: "Generic Password",
 			Type: DetectorSecret,
-			Re:   regexp.MustCompile(`(?i)password["\']?[\s:=]+["\']?([^"'\s]{8,})`),
+			Re:   regexp.MustCompile(`(?i)password["\']?[\s:=]*[:=][\s:=]*["\']?([^"'\s]{8,})`),
 		},
 		{
 			Name: "Password in URL",

@@ -49,3 +49,33 @@ func TestJSONStyleGenericKey(t *testing.T) {
 		t.Error("Generic API Key: expected JSON-style match")
 	}
 }
+
+// TestGenericDetectorsNeedAnAssignmentOperator guards the separator fix. A
+// password input's attributes used to be captured as values: `password`
+// followed by whitespace and `placeholder=` matched Generic Password with the
+// attribute NAME as the token. A key/value pair carries : or =; whitespace on
+// its own is markup or prose. Env, JSON and JS assignment styles still match.
+func TestGenericDetectorsNeedAnAssignmentOperator(t *testing.T) {
+	markup := `<input type="password" placeholder="Enter your password" required="" autocomplete="current-password" ng-model="vm.password">`
+	if ok, tok := findToken(t, "Generic Password", markup); ok {
+		t.Errorf("Generic Password: matched %q inside markup with no assignment operator", tok)
+	}
+	if ok, tok := findToken(t, "Generic Token", `<meta name="csrf-token" content="x"> token spoken here`); ok {
+		t.Errorf("Generic Token: matched %q with whitespace alone as the separator", tok)
+	}
+	still := []struct{ detector, input, want string }{
+		{"Generic Password", `password = "hunter2hunter2"`, "hunter2hunter2"},
+		{"Generic Password", `{"password":"hunter2hunter2"}`, "hunter2hunter2"},
+		{"Generic Password", `PASSWORD=hunter2hunter2`, "hunter2hunter2"},
+		{"Generic API Key", `{"api_key":"abcdef0123456789ABCDEF"}`, "abcdef0123456789ABCDEF"},
+		{"Generic API Key", `api-key: abcdef0123456789ABCDEF`, "abcdef0123456789ABCDEF"},
+		{"Generic Token", `clientToken: 'abcdef0123456789ABCDEF'`, "abcdef0123456789ABCDEF"},
+		{"Generic Secret", `secret === "abcdef0123456789ABCDEF"`, "abcdef0123456789ABCDEF"},
+	}
+	for _, c := range still {
+		ok, tok := findToken(t, c.detector, c.input)
+		if !ok || tok != c.want {
+			t.Errorf("%s: %q -> (%v, %q), want %q", c.detector, c.input, ok, tok, c.want)
+		}
+	}
+}
