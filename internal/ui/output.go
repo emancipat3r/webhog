@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -35,6 +36,32 @@ type Report struct {
 	SourceMaps         int               `json:"source_maps,omitempty"`       // of those, reachable source maps
 	Technologies       []string          `json:"technologies"`                // union of detected technologies
 	Findings           []scanner.Finding `json:"findings"`                    // deduplicated findings
+	// Scripts lists every fetched resource with its body hash, so a later
+	// run can tell which scripts changed. Inline scripts and page bodies are
+	// not listed; they are part of the page.
+	Scripts []ScriptRecord `json:"scripts,omitempty"`
+	// NewFindings counts findings the --baseline did not hold; it is only
+	// present when a baseline was given and knew this target's domain.
+	NewFindings *int `json:"new_findings,omitempty"`
+	// ScriptChanges compares Scripts with the baseline's.
+	ScriptChanges *ScriptChanges `json:"script_changes,omitempty"`
+}
+
+// ScriptRecord identifies one fetched resource by content.
+type ScriptRecord struct {
+	Path       string `json:"path"`
+	Source     string `json:"source"` // external, network, chunk, sourcemap
+	Status     int    `json:"status"`
+	SHA256     string `json:"sha256"`
+	Bytes      int    `json:"bytes"`
+	ThirdParty bool   `json:"third_party,omitempty"`
+}
+
+// ScriptChanges is the script-set difference against a baseline.
+type ScriptChanges struct {
+	Added   int `json:"added"`
+	Changed int `json:"changed"`
+	Removed int `json:"removed"`
 }
 
 // Outputter handles formatting and displaying results
@@ -98,6 +125,9 @@ func (o *Outputter) PrintFinding(w io.Writer, f scanner.Finding) {
 		if tag := o.verificationTag(f); tag != "" {
 			fmt.Fprintf(w, " %s", tag)
 		}
+		for _, tag := range flagTags(f) {
+			fmt.Fprintf(w, " [%s]", tag)
+		}
 		fmt.Fprintln(w)
 		return
 	}
@@ -121,12 +151,55 @@ func (o *Outputter) PrintFinding(w io.Writer, f scanner.Finding) {
 	if tag := o.verificationTag(f); tag != "" {
 		fmt.Fprintf(w, "  %s", tag)
 	}
+	for _, tag := range flagTags(f) {
+		fmt.Fprintf(w, "  %s", snippetStyle.Render(tag))
+	}
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %s %s:%d\n", pathStyle.Render("Location:"), f.Path, f.LineNum)
 	fmt.Fprintf(w, "  %s %s\n", tokenStyle.Render(label+":"), f.Token)
 	if f.Snippet != "" {
 		fmt.Fprintf(w, "  %s %s\n", snippetStyle.Render("Context:"), f.Snippet)
 	}
+	o.printDetails(w, f)
+}
+
+// flagTags are the short labels printed after a finding's detector name.
+func flagTags(f scanner.Finding) []string {
+	var tags []string
+	if f.New {
+		tags = append(tags, "NEW")
+	}
+	if f.Public {
+		tags = append(tags, "public by design")
+	}
+	if f.ThirdParty {
+		tags = append(tags, "third party")
+	}
+	if f.Overflow > 0 {
+		tags = append(tags, fmt.Sprintf("+%d more in this file", f.Overflow))
+	}
+	return tags
+}
+
+// printDetails writes the finding's details, sorted, one per line.
+func (o *Outputter) printDetails(w io.Writer, f scanner.Finding) {
+	if len(f.Details) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(f.Details))
+	for k := range f.Details {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		parts = append(parts, k+"="+f.Details[k])
+	}
+	if o.noStyle {
+		fmt.Fprintf(w, "  Details: %s\n", strings.Join(parts, " "))
+		return
+	}
+	fmt.Fprintf(w, "  %s %s\n", snippetStyle.Render("Details:"), strings.Join(parts, " "))
 }
 
 // OutputJSONL writes one report as a single compact JSON line. It is the
@@ -241,10 +314,14 @@ func (o *Outputter) outputPlain(w io.Writer, report *Report) error {
 			if tag := o.verificationTag(f); tag != "" {
 				fmt.Fprintf(w, " %s", tag)
 			}
+			for _, tag := range flagTags(f) {
+				fmt.Fprintf(w, " [%s]", tag)
+			}
 			fmt.Fprintf(w, "\n%s: %s\n", label, f.Token)
 			if f.Snippet != "" {
 				fmt.Fprintf(w, "Context: %s\n", f.Snippet)
 			}
+			o.printDetails(w, f)
 		}
 	}
 
@@ -337,6 +414,13 @@ func (o *Outputter) buildSummary(report *Report) string {
 	if report.SourceMapsTried > 0 {
 		b.WriteString(fmt.Sprintf("Source Maps: %d of %d tried\n", report.SourceMaps, report.SourceMapsTried))
 	}
+	if report.NewFindings != nil {
+		b.WriteString(fmt.Sprintf("New Since Baseline: %d findings", *report.NewFindings))
+		if c := report.ScriptChanges; c != nil {
+			b.WriteString(fmt.Sprintf("; scripts %d added, %d changed, %d removed", c.Added, c.Changed, c.Removed))
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString(fmt.Sprintf("Total Findings: %d\n\n", len(findings)))
 
 	// Count by type
@@ -380,12 +464,16 @@ func (o *Outputter) outputTypeSection(w io.Writer, title string, fType scanner.D
 		if tag := o.verificationTag(f); tag != "" {
 			fmt.Fprintf(w, "  %s", tag)
 		}
+		for _, tag := range flagTags(f) {
+			fmt.Fprintf(w, "  %s", snippetStyle.Render(tag))
+		}
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  %s %s:%d\n", pathStyle.Render("Location:"), f.Path, f.LineNum)
 		fmt.Fprintf(w, "  %s %s\n", tokenStyle.Render(label+":"), f.Token)
 		if f.Snippet != "" {
 			fmt.Fprintf(w, "  %s %s\n", snippetStyle.Render("Context:"), f.Snippet)
 		}
+		o.printDetails(w, f)
 	}
 
 	fmt.Fprintln(w)

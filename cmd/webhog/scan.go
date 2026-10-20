@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/emancipat3r/webhog/internal/baseline"
 	"github.com/emancipat3r/webhog/internal/crawler"
 	"github.com/emancipat3r/webhog/internal/expand"
 	"github.com/emancipat3r/webhog/internal/ratelimit"
@@ -71,6 +72,8 @@ func init() {
 	scanCmd.Flags().BoolVar(&cfg.Quiet, "quiet", false, "minimal output")
 	scanCmd.Flags().BoolVar(&cfg.PlainOutput, "plain", false, "disable styled output")
 	scanCmd.Flags().StringVarP(&cfg.OutputFile, "output", "o", "", "write results to file")
+	scanCmd.Flags().StringVar(&cfg.Baseline, "baseline", "", "earlier webhog output (--json, --jsonl or one report) to compare against: findings it did not hold are marked new, script changes are counted")
+	scanCmd.Flags().BoolVar(&cfg.OnlyNew, "only-new", false, "with --baseline, report only findings the baseline did not hold")
 
 	// HTTP identity flags. These apply to every outbound request webhog makes
 	// (page fetches, referenced JS, and the headless browser's sub-resources) so
@@ -127,6 +130,9 @@ func expandOptions() expand.Options {
 // fetcher performs the expansion requests; shared across targets.
 var fetcher *expand.Fetcher
 
+// base is the --baseline, nil when none was given.
+var base *baseline.Baseline
+
 // limiter is the process-wide request pacer, built from --rate-limit and
 // --delay at the start of a scan and shared by every renderer and target.
 var limiter *ratelimit.Limiter
@@ -140,6 +146,19 @@ func runScan(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	limiter = ratelimit.New(cfg.RateLimit, cfg.Delay)
+	if cfg.OnlyNew && cfg.Baseline == "" {
+		return fmt.Errorf("--only-new needs --baseline")
+	}
+	if cfg.Baseline != "" {
+		b, err := baseline.Load(cfg.Baseline)
+		if err != nil {
+			return fmt.Errorf("reading --baseline: %w", err)
+		}
+		base = b
+		if cfg.Verbose && !cfg.Quiet {
+			fmt.Fprintf(os.Stderr, "baseline: %d report(s)\n", b.Reports())
+		}
+	}
 
 	// Renderer and tech detector are created once and reused across targets.
 	// In headless mode that means one Chromium process for the whole run,
@@ -392,6 +411,9 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		totalJSBlobs int
 		totalRefused int
 		techSet      = make(map[string]bool)
+		scripts      []ui.ScriptRecord
+		scriptSeen   = make(map[string]bool)
+		scopeDomain  = renderer.RegisteredDomain(target)
 	)
 
 	var s *scanner.Scanner
@@ -417,6 +439,17 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 			}
 			totalJSBlobs += len(page.Result.JSBlobs)
 			totalRefused += page.Result.Refused()
+			for _, b := range page.Result.JSBlobs {
+				if b.Source == "inline" || scriptSeen[b.Path] {
+					continue
+				}
+				scriptSeen[b.Path] = true
+				scripts = append(scripts, ui.ScriptRecord{
+					Path: b.Path, Source: b.Source, Status: b.Status,
+					SHA256: renderer.BodyHash(b.Body), Bytes: len(b.Body),
+					ThirdParty: !renderer.SameRegisteredDomain(scopeDomain, b.Path),
+				})
+			}
 			if detector != nil {
 				for _, t := range detector.Analyze(page.Result.Headers, []byte(page.Result.HTML)) {
 					techSet[t] = true
@@ -436,6 +469,10 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 
 	// Optionally validate secrets against provider APIs before display.
 	var outChan <-chan scanner.Finding = findingsChan
+	known := base != nil && base.Known(target)
+	if known {
+		outChan = markNew(outChan, target)
+	}
 	if cfg.Verify {
 		if cfg.Verbose && !cfg.Quiet {
 			fmt.Fprintln(os.Stderr, "Verifying secrets against provider APIs...")
@@ -482,6 +519,18 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		SourceMaps:         exp.Stats().MapsExposed,
 		Technologies:       sortedKeys(techSet),
 		Findings:           displayFindings,
+		Scripts:            scripts,
+	}
+	if known {
+		n := 0
+		for _, f := range displayFindings {
+			if f.New {
+				n++
+			}
+		}
+		report.NewFindings = &n
+		ch := base.ScriptChanges(target, scripts)
+		report.ScriptChanges = &ch
 	}
 
 	// For non-JSON output, print this target's summary box now.
@@ -650,6 +699,25 @@ func verifyFindings(in <-chan scanner.Finding) <-chan scanner.Finding {
 					cache[key] = r
 				}
 				applyResult(&f, r)
+			}
+			out <- f
+		}
+	}()
+	return out
+}
+
+// markNew flags findings the baseline did not hold for this target's
+// domain and, with --only-new, drops the rest. The counts on the report
+// are taken after this stage, so --only-new changes the list, not the
+// summary of what was found.
+func markNew(in <-chan scanner.Finding, target string) <-chan scanner.Finding {
+	out := make(chan scanner.Finding)
+	go func() {
+		defer close(out)
+		for f := range in {
+			f.New = !base.HasFinding(target, f.Detector, f.Token)
+			if cfg.OnlyNew && !f.New {
+				continue
 			}
 			out <- f
 		}

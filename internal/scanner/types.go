@@ -67,6 +67,9 @@ type Finding struct {
 	// key belongs to, the mode of a Stripe key. Verifiers add what the
 	// provider said (scopes, account identity) under the same map.
 	Details map[string]string `json:"details,omitempty"`
+	// New is true when a --baseline was given, knew the target's domain,
+	// and did not hold this detector and token.
+	New bool `json:"new,omitempty"`
 	// Overflow is set on the last finding kept for a (file, detector) pair
 	// when the generic cap dropped further matches in the same file; it is
 	// the number of matches not reported.

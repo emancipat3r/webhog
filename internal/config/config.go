@@ -28,6 +28,10 @@ type Config struct {
 	MinLength      int
 	Verify         bool
 
+	// Comparison against an earlier run.
+	Baseline string // path to earlier output
+	OnlyNew  bool   // report only findings the baseline did not hold
+
 	// Expansion: source maps and lazily loaded chunks.
 	SourceMaps      bool  // follow sourceMappingURL comments
 	ProbeSourceMaps bool  // try <script>.map when no comment names one
