@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/emancipat3r/webhog/internal/crawler"
+	"github.com/emancipat3r/webhog/internal/expand"
 	"github.com/emancipat3r/webhog/internal/ratelimit"
 	"github.com/emancipat3r/webhog/internal/renderer"
 	"github.com/emancipat3r/webhog/internal/scanner"
@@ -77,6 +78,15 @@ func init() {
 	scanCmd.Flags().StringVar(&cfg.UserAgent, "user-agent", "", "User-Agent to send on every request (empty = webhog default)")
 	scanCmd.Flags().StringArrayVar(&cfg.Headers, "header", nil, "extra request header as \"Key: Value\"; repeatable")
 
+	// Expansion flags. Source maps and chunks are extra requests per script,
+	// paced by the same limiter as everything else.
+	scanCmd.Flags().BoolVar(&cfg.SourceMaps, "source-maps", true, "fetch the source map a script names and mine the original sources it embeds")
+	scanCmd.Flags().BoolVar(&cfg.ProbeSourceMaps, "probe-source-maps", true, "when a script names no map, try <script>.map (one request per script)")
+	scanCmd.Flags().BoolVar(&cfg.VendorSources, "vendor-sources", false, "also mine node_modules sources embedded in source maps")
+	scanCmd.Flags().Int64Var(&cfg.MaxMapSize, "max-map-size", expand.DefaultMaxMapBytes, "largest source map to download, in bytes")
+	scanCmd.Flags().BoolVar(&cfg.Chunks, "chunks", true, "discover lazily loaded chunks from the bundler runtime (webpack, Vite, Next.js, dynamic imports, service workers) and fetch them")
+	scanCmd.Flags().IntVar(&cfg.MaxChunks, "max-chunks", expand.DefaultMaxChunks, "chunks to fetch per target at most")
+
 	// Detection flags
 	scanCmd.Flags().BoolVar(&cfg.Verify, "verify", false, "validate detected secrets against provider APIs (makes outbound read-only requests using the discovered credentials)")
 	scanCmd.Flags().BoolVar(&cfg.IncludeEntropy, "include-entropy", false, "enable entropy-based detection")
@@ -102,6 +112,21 @@ func scannerOptions(target string) scanner.Options {
 	}
 }
 
+// expandOptions maps the expansion flags onto the expander.
+func expandOptions() expand.Options {
+	return expand.Options{
+		SourceMaps:    cfg.SourceMaps,
+		ProbeMaps:     cfg.ProbeSourceMaps,
+		IncludeVendor: cfg.VendorSources,
+		MaxMapBytes:   cfg.MaxMapSize,
+		Chunks:        cfg.Chunks,
+		MaxChunks:     cfg.MaxChunks,
+	}
+}
+
+// fetcher performs the expansion requests; shared across targets.
+var fetcher *expand.Fetcher
+
 // limiter is the process-wide request pacer, built from --rate-limit and
 // --delay at the start of a scan and shared by every renderer and target.
 var limiter *ratelimit.Limiter
@@ -122,6 +147,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// its own incognito context inside it (see scanOne). Per-page timeouts are
 	// applied by the crawler, so the base context carries no overall deadline.
 	httpCfg := buildHTTPConfig()
+	fetcher = expand.NewFetcher(cfg.Timeout, httpCfg, cfg.MaxMapSize)
 	var r renderer.Renderer
 	if cfg.Headless {
 		hr := renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg).SetDOMWait(cfg.DOMWait)
@@ -332,6 +358,10 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		defer session.Close()
 		r = session
 	}
+	// Expansion state is per target: what was fetched once is not fetched
+	// again for another page of the same crawl.
+	exp := expand.New(r, fetcher, expandOptions())
+	r = exp
 
 	// The crawl frontier is expanded with both <a href> anchors and the
 	// endpoints the scanner discovers inside JavaScript/HTML, so additional
@@ -446,6 +476,10 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		JSBlobs:            totalJSBlobs,
 		JSRefused:          totalRefused,
 		JSDeduped:          s.Deduped(),
+		JSChunks:           exp.Stats().ChunksFetched,
+		ChunksCapped:       exp.Stats().ChunksCapped,
+		SourceMapsTried:    exp.Stats().MapsTried,
+		SourceMaps:         exp.Stats().MapsExposed,
 		Technologies:       sortedKeys(techSet),
 		Findings:           displayFindings,
 	}

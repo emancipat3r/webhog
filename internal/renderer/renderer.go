@@ -12,7 +12,7 @@ import (
 
 // JSBlob represents a JavaScript code blob found on a page
 type JSBlob struct {
-	Source string // "inline", "external", "network"
+	Source string // "inline", "external", "network", "chunk", "sourcemap"
 	Path   string // URL or identifier like "URL#inline-N"
 	Body   string // The actual JavaScript content
 	// Status is the HTTP status the resource was served with, when it was
@@ -32,6 +32,18 @@ type ResourceError struct {
 	Err string
 }
 
+// SourceMapRef records a source map that was reachable for one of the
+// page's scripts: an exposure in itself, since the map carries the original
+// file names and usually the original sources.
+type SourceMapRef struct {
+	Script        string // the script the map belongs to
+	MapURL        string // where the map was fetched from
+	Referenced    bool   // named by the script's sourceMappingURL comment (false: found by probing)
+	Sources       int    // files the map lists
+	WithContent   int    // of those, files whose full source the map embeds
+	VendorSkipped int    // embedded sources under node_modules, counted but not mined
+}
+
 // RenderResult contains the rendered page and all discovered JavaScript
 type RenderResult struct {
 	URL     string              // The final URL (after redirects)
@@ -40,6 +52,9 @@ type RenderResult struct {
 	Headers map[string][]string // HTTP Response Headers
 	JSBlobs []JSBlob            // All JavaScript found
 	Errors  []ResourceError     // Referenced resources that could not be fetched
+	// SourceMaps lists the source maps reached for this page's scripts; the
+	// sources they embed are among JSBlobs with Source "sourcemap".
+	SourceMaps []SourceMapRef
 }
 
 // Refused counts the external resources of a page that were refused: those

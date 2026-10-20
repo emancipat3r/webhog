@@ -13,6 +13,10 @@ import (
 // override it via --user-agent. It carries the build version.
 var defaultUserAgent = version.UserAgent()
 
+// DefaultUserAgent returns the User-Agent webhog sends when the caller does
+// not override it.
+func DefaultUserAgent() string { return defaultUserAgent }
+
 // Header is a single extra request header supplied by the caller.
 type Header struct {
 	Key   string

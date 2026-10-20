@@ -28,6 +28,14 @@ type Config struct {
 	MinLength      int
 	Verify         bool
 
+	// Expansion: source maps and lazily loaded chunks.
+	SourceMaps      bool  // follow sourceMappingURL comments
+	ProbeSourceMaps bool  // try <script>.map when no comment names one
+	VendorSources   bool  // mine node_modules sources embedded in maps
+	MaxMapSize      int64 // cap on one map download in bytes
+	Chunks          bool  // discover and fetch lazily loaded chunks
+	MaxChunks       int   // cap on chunks fetched per target
+
 	// Detector selection and noise control.
 	Detectors        []string // run only these detectors (names or type words)
 	ExcludeDetectors []string // skip these detectors

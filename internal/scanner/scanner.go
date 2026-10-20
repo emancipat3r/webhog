@@ -193,12 +193,45 @@ func (s *Scanner) Scan(result *renderer.RenderResult) []Finding {
 
 // ScanStream processes a RenderResult and sends findings to the provided channel
 func (s *Scanner) ScanStream(result *renderer.RenderResult, findingsChan chan<- Finding) {
+	for _, f := range sourceMapFindings(result) {
+		findingsChan <- f
+	}
 	for _, blob := range scanTargets(result) {
 		loadedFrom := loadedFromFor(blob, result.URL)
 		for _, f := range s.scanBlob(blob, loadedFrom) {
 			findingsChan <- f
 		}
 	}
+}
+
+// sourceMapFindings reports each reachable source map as a finding: the
+// map is an exposure on its own, naming the original files and usually
+// carrying their source. The secrets found inside the sources are separate
+// findings whose path is the map URL plus the source file.
+func sourceMapFindings(result *renderer.RenderResult) []Finding {
+	var out []Finding
+	for _, sm := range result.SourceMaps {
+		how := "probed"
+		if sm.Referenced {
+			how = "referenced by the script"
+		}
+		snippet := fmt.Sprintf("%s: %d sources, %d with content, %d vendor sources not mined", how, sm.Sources, sm.WithContent, sm.VendorSkipped)
+		out = append(out, Finding{
+			Detector:   "Source Map Exposed",
+			Type:       DetectorConfig,
+			Path:       sm.Script,
+			Snippet:    snippet,
+			Token:      sm.MapURL,
+			LoadedFrom: loadedFromPtr(result.URL),
+			Details: map[string]string{
+				"sources":        fmt.Sprint(sm.Sources),
+				"with_content":   fmt.Sprint(sm.WithContent),
+				"vendor_skipped": fmt.Sprint(sm.VendorSkipped),
+				"referenced":     fmt.Sprint(sm.Referenced),
+			},
+		})
+	}
+	return out
 }
 
 // loadedFromFor returns the provenance for findings produced from blob: the URL
