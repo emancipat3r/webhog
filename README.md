@@ -17,19 +17,54 @@ Inspired by the [TruffleHog browser extension](https://github.com/trufflesecurit
 
 - **Auto-Download Chromium**: When using headless mode, Chromium is automatically downloaded if not found (cached for future use)
 
-- **Comprehensive Detection**
-  - **TruffleHog Integration**: Includes 20+ secret detectors from the TruffleHog Browser Extension
-  - AWS credentials (Access Keys, Secret Keys, AppSync, MWS)
-  - Google API keys and OAuth tokens
-  - Stripe API keys
-  - GitHub Personal Access Tokens and Legacy Tokens
-  - Facebook Access Tokens and OAuth
-  - Heroku, MailChimp, PayPal, Picatic, Square, Telegram keys
-  - JWT tokens
-  - Password in URL
-  - Database connection strings (PostgreSQL, MySQL, MongoDB, Redis)
-  - SSH private keys
-  - And more...
+- **Detection**
+  - About a hundred detectors: cloud providers (AWS, Azure, DigitalOcean,
+    Vault, Pulumi, Databricks, PlanetScale, Doppler), Google (API keys, OAuth
+    client secrets and IDs, refresh tokens, service accounts, Firebase
+    configs and database URLs), payments (Stripe keys and webhook secrets,
+    Braintree, Square), source control and registries (GitHub classic,
+    fine-grained and app tokens, GitLab, npm, PyPI, Atlassian), AI providers
+    (OpenAI, Anthropic, Hugging Face, Groq, Perplexity, Replicate), messaging
+    (Slack tokens and webhooks, Discord, Telegram, Twilio, SendGrid, Mailgun,
+    Mailchimp, Postmark, Resend, Twitter), SaaS (Shopify, Notion, Linear,
+    Airtable, Supabase, Mapbox, Algolia, Sentry, Datadog, Cloudflare, New
+    Relic, Grafana, LaunchDarkly, Dropbox, Postman, Contentful, Heroku), JWTs,
+    private keys, passwords in URLs, connection strings, and four Generic
+    rules. `webhog detectors` lists them.
+  - **Public by design**: shapes a provider intends to ship to browsers
+    (Stripe publishable keys, Datadog client tokens, Sentry DSNs, Mapbox `pk.`
+    tokens, OAuth client IDs) are reported and labelled `public`, not dropped
+    and not mistaken for leaks.
+  - **Offline enrichment**: with no network traffic, a JWT's algorithm,
+    issuer, subject, role, scope, issue and expiry times and expired flag
+    (unsigned and Supabase `service_role` tokens called out); the AWS account
+    ID decoded from an access key ID; Stripe key kind and mode; Slack token
+    family; a Firebase config's project, bucket and database URL.
+  - **Noise control**: a Generic value must look like a credential (digits
+    and a spread character distribution, no placeholder words), a Generic row
+    that repeats a named match is dropped, and `--generic-cap` keeps a bundle
+    with hundreds of `token:` assignments from producing hundreds of rows.
+  - `--detectors` / `--exclude-detectors` select by name or type.
+
+- **Source Maps**
+  - Follows each script's `sourceMappingURL` comment (inline `data:` maps
+    included) and, when there is none, probes `<script>.map`. A reachable map
+    is reported as a `Source Map Exposed` finding, and the original sources
+    it embeds are mined under their own file names, so a key in
+    `src/config.ts` is found where the developer wrote it. Vendor sources
+    under `node_modules` are counted but not mined unless asked.
+
+- **Lazily Loaded Chunks**
+  - Reconstructs chunk filenames from a webpack 4 or 5 runtime, reads Vite's
+    dependency array, fetches a Next.js build manifest from the build id,
+    follows dynamic `import()` literals, `modulepreload` links,
+    `importScripts` and a service worker's precache manifest. Route code the
+    landing page never loads is scanned anyway.
+
+- **Third Party and Deduplication**
+  - A script served from another registered domain is labelled
+    `third_party`; `--first-party-only` skips mining it. A byte-identical body
+    is scanned once per target however many URLs or pages serve it.
 
 - **Advanced Attack Surface Mapping**
   - **HTML Scanning**: Scans the full HTML source, not just JavaScript blobs
@@ -42,8 +77,27 @@ Inspired by the [TruffleHog browser extension](https://github.com/trufflesecurit
 
 - **Secret Verification** (opt-in via `--verify`)
   - Validates detected secrets against the provider's API and labels each one **active**, **inactive**, or **unverified**
-  - All checks are read-only (identity/status endpoints — never mutates provider state)
-  - Supported providers: GitHub (PAT & OAuth), Stripe (standard & restricted), Slack, SendGrid, Telegram bot, Mailgun
+  - All checks are read-only (identity, status and listing endpoints; nothing is written)
+  - About forty providers, and what the provider says about the credential
+    rides on the finding: GitHub token scopes and login, SendGrid and Airtable
+    scopes, the Slack workspace, account identities
+  - Google API keys are probed for the APIs they are enabled on (Generative
+    Language, Geocoding, Static Maps, YouTube) and whether they are
+    referrer-restricted
+  - Firebase: open database reads, open Firestore reads, open storage listing
+  - AWS access key and secret found together are verified as a pair over STS
+    `GetCallerIdentity`, which names the account and principal
+
+- **Compare Against an Earlier Run**
+  - `--baseline` takes a previous output and marks findings it did not hold
+    as `new`; `--only-new` lists only those. Every report carries the hash of
+    each fetched script, and against a baseline the count of scripts added,
+    changed and removed.
+
+- **Auto Mode**
+  - `--mode auto` fetches statically and switches a target to the browser
+    only when the static answer looks like bot management, so a list of
+    hosts costs a browser only where one is needed.
 
 - **Technology Detection (Wappalyzer)**
   - Identifies CMS, frameworks, servers, and more using [wappalyzergo](https://github.com/projectdiscovery/wappalyzergo)
@@ -57,9 +111,9 @@ Inspired by the [TruffleHog browser extension](https://github.com/trufflesecurit
     target on disk
 
 - **Rate Limiting and Concurrency**
-  - `--rate-limit` / `--delay` cap the requests webhog originates across the
-    whole run, so it can honor a program's request ceiling like the rest of a
-    recon pipeline
+  - `--rate-limit` / `--delay` cap every request across the whole run,
+    including the script and XHR loads the browser makes on its own, so it
+    can honor a program's request ceiling like the rest of a recon pipeline
   - `--concurrency` renders several pages of a target at once and
     `--parallel` scans several targets at once, always under the same ceiling
 
@@ -123,6 +177,85 @@ storage never bleed between hosts. After `window.onload` the page gets
 `--dom-wait` (default 3s) to settle before it is read; raise it for SPAs that
 load slowly, lower it for speed.
 
+### Auto Mode
+
+```bash
+webhog scan --mode auto --list hosts.txt
+```
+
+Each target is fetched statically first. When the answer looks like bot
+management (a 403, 429 or 503 with a small body or with every script
+refused, or a body carrying a Cloudflare, Akamai, PerimeterX, DataDome,
+Imperva, Distil or Kasada marker) that target switches to the browser for the
+rest of its pages. A target that was never blocked never starts the browser.
+The switch is printed to stderr.
+
+### Source Maps and Chunks
+
+Both are on by default and cost extra requests per script, paced by the same
+limiter as everything else:
+
+```bash
+webhog scan https://app.example.com                      # maps followed and probed, chunks fetched
+webhog scan --probe-source-maps=false https://app.example.com   # follow comments only
+webhog scan --chunks=false --source-maps=false https://app.example.com
+webhog scan --vendor-sources https://app.example.com     # mine node_modules sources inside maps too
+```
+
+A reachable map is a `Source Map Exposed` finding on the script, with the
+number of sources, how many carry content, and whether the map was named by
+the script or found by probing. Findings inside the sources have a path of
+`<map URL>#<source file>`. The summary reports `Source Maps: 2 of 7 tried`
+and `JS Chunks: 41`, and `--max-chunks` (default 200) and `--max-map-size`
+(default 64 MiB) bound the work.
+
+### Compare Against an Earlier Run
+
+```bash
+webhog scan --list hosts.txt --jsonl -o monday.jsonl
+webhog scan --list hosts.txt --jsonl -o tuesday.jsonl --baseline monday.jsonl --only-new
+```
+
+The baseline is indexed by the registered domain of each seed. Findings it
+did not hold are marked `new: true` and counted in `new_findings`; with
+`--only-new` the others are left out of the list while the summary still
+counts them. Every report lists its fetched scripts with a SHA-256, and
+against a baseline `script_changes` counts those added, changed and removed,
+which usually moves before any finding does. A target the baseline never saw
+is not marked at all.
+
+### Choose Detectors
+
+```bash
+webhog detectors                                  # the table: name, type, public, verifiable
+webhog scan --detectors secret,config https://example.com
+webhog scan --exclude-detectors generic,"HTTP URL" https://example.com
+```
+
+Names are matched case-insensitively; the words `secret`, `config`,
+`endpoint` and `generic` select a whole type. An unknown name is an error
+before any request is made.
+
+### Probe Runtime Configuration
+
+```bash
+webhog scan --probe-config https://app.example.com
+```
+
+Adds the well-known runtime configuration paths (`/config.json`, `/env.js`,
+`/environment.json`, their `assets/` and `static/` variants, `/api/config`,
+the OpenID configuration) as seeds. Single-page apps fetch these after load,
+so their contents are in no bundle.
+
+### Redact Tokens
+
+```bash
+webhog scan --redact --json https://example.com
+```
+
+Masks every token in text and JSON output, keeping the first and last four
+characters so two reports can still be matched up.
+
 ### Scan Many Targets
 
 Pass multiple URLs, read them from a file with `--list`, or pipe them on stdin
@@ -163,12 +296,12 @@ target.
 webhog scan --list hosts.txt --rate-limit 10 --concurrency 4 --parallel 2
 ```
 
-- `--rate-limit N` caps the requests webhog originates at N per second across
-  the **whole run**: page fetches, script fetches in static mode, `robots.txt`
-  and headless navigations, over every worker and target. `--delay D` forces a
-  minimum spacing instead; the stricter of the two wins. Sub-resources Chrome
-  loads on its own during a headless navigation cannot be paced individually;
-  one navigation counts as one request.
+- `--rate-limit N` caps requests at N per second across the **whole run**:
+  page fetches, script fetches in static mode, `robots.txt`, source maps,
+  chunks, headless navigations, and the script and XHR loads the browser
+  makes during a navigation (held at the request stage until the limiter
+  grants a slot), over every worker and target. `--delay D` forces a minimum
+  spacing instead; the stricter of the two wins.
 - `--concurrency N` (default 4) renders up to N pages of one target at once.
 - `--parallel N` (default 1) scans up to N targets at once. Live text output
   is buffered per target and printed whole when it completes, so reports never
@@ -256,8 +389,19 @@ webhog scan --verify https://example.com
 ```
 
 > `--verify` sends the discovered credentials to their providers over read-only
-> endpoints (e.g. GitHub `/user`, Stripe `/v1/balance`, Slack `auth.test`). Only
-> run it against targets you are authorized to test.
+> endpoints (e.g. GitHub `/user`, Stripe `/v1/balance`, Slack `auth.test`,
+> STS `GetCallerIdentity`). Only run it against targets you are authorized to
+> test. The Google Geocoding and Static Maps probes are billable to the key's
+> owner at a fraction of a cent each.
+
+What the provider reports about the credential is recorded on the finding's
+`details`: GitHub's `scopes` header and the login, SendGrid and Airtable
+scopes, the Slack team and workspace URL, the email or username behind an
+identity endpoint, the APIs a Google key is enabled for (`apis_enabled`,
+`apis_denied`, `restricted`), whether a Firebase project allows
+unauthenticated reads (`firestore_open`, `storage_listing_open`,
+`rtdb_open_read`), and the account and ARN an AWS pair belongs to.
+Public-by-design shapes are not sent anywhere.
 
 ## Examples
 
@@ -307,7 +451,8 @@ webhog scan --json https://example.com | jq '.findings[] | select(.type=="secret
 ### Scan Command Flags
 
 **Mode:**
-- `--headless`: Use headless browser rendering (default: false)
+- `--mode`: `static` (HTTP only, default), `headless` (browser for every page), or `auto` (HTTP first, browser for a target whose answer looks like bot management)
+- `--headless`: Same as `--mode headless`
 - `--timeout`: Page load timeout (default: 30s)
 - `--dom-wait`: Headless only. Time to let a page settle after load before reading it (default: 3s; 0 = none)
 
@@ -322,6 +467,9 @@ webhog scan --json https://example.com | jq '.findings[] | select(.type=="secret
 
 **Output:**
 - `-o, --output`: Write results to file
+- `--redact`: Mask every token in text and JSON output
+- `--baseline`: Earlier webhog output to compare against; findings it did not hold are marked `new`
+- `--only-new`: With `--baseline`, report only new findings
 - `--json`: Output results as JSON (one object for a single target, an array for many, written when the run ends)
 - `--jsonl`: Output results as JSON Lines, one report per line written as each target completes
 - `--quiet`: Minimal output
@@ -332,37 +480,73 @@ webhog scan --json https://example.com | jq '.findings[] | select(.type=="secret
 - `--max-pages`: Maximum number of pages to crawl (default: 200; 0 = unlimited)
 - `--same-domain`: Restrict the crawl to the seed's registered (apex) domain (default: true; e.g. `api.example.com` and `www.example.com` both count for a seed on `example.com`). Set `--same-domain=false` to follow off-domain links too.
 - `--robots`: Use `robots.txt` as an enumeration source — scan its `Disallow`/`Allow` paths and `Sitemap:` URLs (default: false). Does **not** honor crawl restrictions; authorized targets only.
+- `--probe-config`: Also scan the well-known runtime configuration paths as seeds (default: false)
+
+**Expansion:**
+- `--source-maps`: Follow `sourceMappingURL` comments and mine the sources a map embeds (default: true)
+- `--probe-source-maps`: When a script names no map, try `<script>.map` (default: true)
+- `--vendor-sources`: Also mine `node_modules` sources embedded in maps (default: false)
+- `--max-map-size`: Largest source map to download, in bytes (default: 64 MiB)
+- `--chunks`: Discover lazily loaded chunks from the bundler runtime and fetch them (default: true)
+- `--max-chunks`: Chunks to fetch per target at most (default: 200)
 
 **Detection:**
 - `--verify`: Validate detected secrets against provider APIs (read-only). Makes outbound requests using the discovered credentials — only use against targets you're authorized to test.
+- `--detectors`: Run only these detectors (names or the type words `secret`, `config`, `endpoint`, `generic`)
+- `--exclude-detectors`: Skip these detectors
+- `--generic-cap`: Matches one Generic detector may report from one file before the rest are counted as `overflow` (default: 20; -1 = no cap)
+- `--first-party-only`: Mine only resources served from the target's registered domain
 - `--include-entropy`: Enable entropy-based detection
 - `--min-entropy`: Minimum entropy threshold (default: 4.5)
 - `--min-length`: Minimum token length for detection (default: 20)
 
 ## Detection Rules
 
-Webhog includes built-in detectors for:
+`webhog detectors` prints the full table. Detector names are part of the
+output contract: consumers match on them, so they do not change.
 
-### Secrets & Keys
-- AWS Access Key IDs and Secret Keys, MWS, AppSync
-- Google API Keys and OAuth tokens
-- Stripe API keys (live and test)
-- GitHub Personal Access Tokens
-- Facebook Access Tokens
-- Heroku, MailChimp, PayPal, Picatic, Square, Telegram
-- JWT tokens
-- Generic API keys, tokens, secrets, passwords
-- SSH private keys
+### Secrets
+Cloud (AWS access keys, secrets, MWS, AppSync; Azure storage keys;
+DigitalOcean; Vault; Pulumi; Databricks; PlanetScale; Doppler), Google (API
+keys, OAuth client secrets, refresh tokens, service accounts), Facebook,
+Stripe (secret, restricted, webhook signing), Braintree, Square, GitHub
+(classic, fine-grained, OAuth, app, legacy), GitLab, npm, PyPI, Atlassian,
+OpenAI, Anthropic, Hugging Face, Groq, Perplexity, Replicate, Slack (tokens,
+app-level, webhooks), Discord (bot tokens, webhooks), Telegram, Twilio,
+SendGrid, Mailgun, Mailchimp, Postmark, Resend, Twitter, Heroku, Shopify,
+Notion, Linear, Airtable, Supabase, Mapbox, Algolia, Cloudflare, New Relic,
+Grafana, LaunchDarkly, Dropbox, Postman, Contentful, age, JWTs, private keys
+(PEM, any kind), passwords in URLs.
+
+### Public by design (labelled, not dropped)
+Stripe publishable keys, Google OAuth client IDs, Twilio account SIDs,
+Supabase publishable keys, Mapbox `pk.` tokens, Sentry DSNs, Datadog client
+tokens, Cloudflare beacon tokens, New Relic browser keys.
+
+### Generic
+API key, token, secret and password assignments whose value looks like a
+credential.
 
 ### Configuration
-- Database connection strings (PostgreSQL, MySQL, MongoDB, Redis)
-- Passwords in URLs
+Firebase configs and database URLs; connection strings (PostgreSQL, MySQL,
+MongoDB, Redis, AMQP, SQL Server); exposed source maps.
 
 ### Endpoints
-- HTTP/HTTPS URLs and Relative Paths
-- WebSocket URLs
-- API endpoints (`/api/*`)
-- GraphQL endpoints
+HTTP/HTTPS URLs and relative paths, WebSocket URLs, API endpoints
+(`/api/*`), GraphQL endpoints, admin and internal paths.
+
+## Report Fields
+
+Each finding carries `detector`, `type`, `path`, `line`, `snippet`, `token`,
+`loaded_from` (the page that referenced the resource, or `null` for the page
+itself), and when applicable `public`, `third_party`, `details` (offline
+enrichment and what verification learned), `verification`, `new` (against a
+baseline) and `overflow` (matches not listed because of `--generic-cap`).
+
+Each report carries the counters `pages_crawled`, `js_blobs`, `js_refused`,
+`js_deduped`, `js_chunks`, `js_chunks_capped`, `source_maps_tried`,
+`source_maps`, the `scripts` list (path, source, status, SHA-256, size,
+third party), and against a baseline `new_findings` and `script_changes`.
 
 ## Architecture
 
@@ -371,14 +555,17 @@ webhog/
 ├── cmd/webhog/          # CLI entry point (Cobra)
 │   ├── main.go
 │   ├── root.go
-│   └── scan.go
+│   ├── scan.go
+│   └── detectors.go     # `webhog detectors`
 ├── internal/
-│   ├── renderer/        # Page rendering (static & headless)
+│   ├── renderer/        # Page rendering (static, headless, auto)
 │   ├── crawler/         # Breadth-first multi-page crawling (worker pool)
+│   ├── expand/          # Source maps and lazily loaded chunks
 │   ├── ratelimit/       # Process-wide request pacing
 │   ├── version/         # Build version and commit
-│   ├── scanner/         # Secret detection (Regex & Entropy)
+│   ├── scanner/         # Detector table, noise control, offline enrichment
 │   ├── verifier/        # Live credential validation (--verify)
+│   ├── baseline/        # Comparison against an earlier run
 │   ├── tech/            # Wappalyzer integration
 │   ├── ui/              # Styled output (Lip Gloss)
 │   └── config/          # Configuration
@@ -410,8 +597,9 @@ webhog/
 ## Limitations
 
 - Crawling follows `<a href>` anchors and endpoints found via the scanner's regexes in JS/HTML, but not URLs assembled dynamically at runtime (e.g. string-concatenated paths). Headless mode does pick up scripts and `fetch`/XHR responses the page requests at runtime.
-- The rate limiter paces requests webhog originates. The sub-resources Chrome loads by itself during a headless navigation are not individually paced.
-- Static mode doesn't execute JavaScript (use `--headless` for SPAs)
+- Chunk and source map fetches use Go's HTTP client even in headless mode, so a host whose bot management rejects non-browser clients may refuse them; the refusal is counted.
+- Chunk templates are reconstructed from the common webpack, Vite and Next.js shapes; an unusual runtime yields nothing rather than something wrong.
+- Static mode doesn't execute JavaScript (use `--headless` or `--mode auto` for SPAs)
 - Headless mode requires more resources and time
 
 ## Contributing
@@ -419,7 +607,6 @@ webhog/
 Contributions are welcome! Areas for improvement:
 - Additional secret detectors and verifiers
 - Custom detector rules
-- An automatic mode that scans statically and retries through the browser only when the response looks like bot management
 
 ## License
 
