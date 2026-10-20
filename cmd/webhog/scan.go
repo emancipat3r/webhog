@@ -57,6 +57,9 @@ func init() {
 	scanCmd.Flags().IntVar(&cfg.MaxPages, "max-pages", 200, "maximum pages to crawl per target (0 = unlimited)")
 	scanCmd.Flags().BoolVar(&cfg.SameDomain, "same-domain", true, "restrict the crawl to the seed's registered (apex) domain; set to false to follow off-domain links too")
 	scanCmd.Flags().BoolVar(&cfg.ProbeConfig, "probe-config", false, "also scan the well-known runtime config paths (config.json, env.js, ...) as seeds")
+	scanCmd.Flags().BoolVar(&cfg.ProbeExposures, "probe-exposures", false, "also scan the well-known exposure paths (.env, .git/config, swagger.json, openapi.json, actuator/env, ...) as seeds")
+	scanCmd.Flags().BoolVar(&cfg.ShapesOnce, "shapes-once", true, "crawl one URL per path shape: /item/1 and /item/2 are one template and load the same scripts")
+	scanCmd.Flags().BoolVar(&cfg.CaptureState, "capture-state", true, "headless and auto: read localStorage, sessionStorage, cookies and framework globals after each page settles and scan them")
 	scanCmd.Flags().BoolVar(&cfg.Robots, "robots", false, "use robots.txt as an enumeration source: scan its Disallow/Allow paths and Sitemap URLs (does NOT honor crawl restrictions)")
 
 	// Pacing flags. The limiter is process-wide: it covers every request webhog
@@ -93,6 +96,9 @@ func init() {
 	scanCmd.Flags().Int64Var(&cfg.MaxMapSize, "max-map-size", expand.DefaultMaxMapBytes, "largest source map to download, in bytes")
 	scanCmd.Flags().BoolVar(&cfg.Chunks, "chunks", true, "discover lazily loaded chunks from the bundler runtime (webpack, Vite, Next.js, dynamic imports, service workers) and fetch them")
 	scanCmd.Flags().IntVar(&cfg.MaxChunks, "max-chunks", expand.DefaultMaxChunks, "chunks to fetch per target at most")
+	scanCmd.Flags().BoolVar(&cfg.Wayback, "wayback", false, "ask the Wayback Machine for scripts captured under the target's host and fetch the ones the live page no longer loads")
+	scanCmd.Flags().BoolVar(&cfg.WaybackArchived, "wayback-archived", false, "with --wayback, fetch the archived copies from web.archive.org instead of the live URLs (no request reaches the target for them)")
+	scanCmd.Flags().IntVar(&cfg.MaxWayback, "max-wayback", expand.DefaultMaxWayback, "historical scripts to fetch per target at most")
 
 	// Detection flags
 	scanCmd.Flags().BoolVar(&cfg.Verify, "verify", false, "validate detected secrets against provider APIs (makes outbound read-only requests using the discovered credentials)")
@@ -138,12 +144,15 @@ func loadBaseline() error {
 // expandOptions maps the expansion flags onto the expander.
 func expandOptions() expand.Options {
 	return expand.Options{
-		SourceMaps:    cfg.SourceMaps,
-		ProbeMaps:     cfg.ProbeSourceMaps,
-		IncludeVendor: cfg.VendorSources,
-		MaxMapBytes:   cfg.MaxMapSize,
-		Chunks:        cfg.Chunks,
-		MaxChunks:     cfg.MaxChunks,
+		SourceMaps:      cfg.SourceMaps,
+		ProbeMaps:       cfg.ProbeSourceMaps,
+		IncludeVendor:   cfg.VendorSources,
+		MaxMapBytes:     cfg.MaxMapSize,
+		Chunks:          cfg.Chunks,
+		MaxChunks:       cfg.MaxChunks,
+		Wayback:         cfg.Wayback,
+		WaybackArchived: cfg.WaybackArchived,
+		MaxWayback:      cfg.MaxWayback,
 	}
 }
 
@@ -187,11 +196,11 @@ func runScan(cmd *cobra.Command, args []string) error {
 	var r renderer.Renderer
 	switch mode {
 	case "headless":
-		hr := renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg).SetDOMWait(cfg.DOMWait)
+		hr := renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg).SetDOMWait(cfg.DOMWait).SetCaptureState(cfg.CaptureState)
 		defer hr.Close()
 		r = hr
 	case "auto":
-		hr := renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg).SetDOMWait(cfg.DOMWait)
+		hr := renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg).SetDOMWait(cfg.DOMWait).SetCaptureState(cfg.CaptureState)
 		defer hr.Close()
 		r = renderer.NewAutoRenderer(renderer.NewStaticRenderer(cfg.Timeout, httpCfg), hr, func(u string) {
 			if !cfg.Quiet {
@@ -418,14 +427,18 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		return endpointScanner.ExtractEndpoints(res)
 	}
 	c := crawler.New(r, cfg.MaxDepth, cfg.MaxPages, cfg.SameDomain, cfg.Timeout, discoverEndpoints).
-		SetConcurrency(cfg.Concurrency)
+		SetConcurrency(cfg.Concurrency).
+		SetOnePerShape(cfg.ShapesOnce)
 
 	// Build the seed list. With --robots, robots.txt is mined for paths to scan
 	// (Disallow/Allow entries and Sitemap URLs) and added as seeds, so they are
 	// enumerated even without deep crawling.
 	seeds := []string{target}
 	if cfg.ProbeConfig {
-		seeds = append(seeds, configSeeds(target)...)
+		seeds = append(seeds, seedPaths(target, configPaths)...)
+	}
+	if cfg.ProbeExposures {
+		seeds = append(seeds, seedPaths(target, exposurePaths)...)
 	}
 	if cfg.Robots {
 		robotsTargets := crawler.RobotsTargets(context.Background(), target, &http.Client{Timeout: cfg.Timeout}, buildHTTPConfig())
@@ -471,7 +484,7 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 			totalJSBlobs += len(page.Result.JSBlobs)
 			totalRefused += page.Result.Refused()
 			for _, b := range page.Result.JSBlobs {
-				if b.Source == "inline" || scriptSeen[b.Path] {
+				if b.Source == "inline" || b.Source == "state" || scriptSeen[b.Path] {
 					continue
 				}
 				scriptSeen[b.Path] = true
@@ -551,6 +564,8 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		ChunksCapped:       exp.Stats().ChunksCapped,
 		SourceMapsTried:    exp.Stats().MapsTried,
 		SourceMaps:         exp.Stats().MapsExposed,
+		WaybackScripts:     exp.Stats().WaybackFetched,
+		PagesSkippedShape:  c.ShapeSkipped(),
 		Technologies:       sortedKeys(techSet),
 		Findings:           displayFindings,
 		Scripts:            scripts,
@@ -585,19 +600,33 @@ var configPaths = []string{
 	"/static/config.json", "/api/config", "/api/v1/config", "/.well-known/openid-configuration",
 }
 
-// configSeeds returns the config probe URLs for a target's origin.
-func configSeeds(target string) []string {
+// exposurePaths are files that should never be served and often are: the
+// deploy environment, the repository metadata, the API contract, and the
+// Spring actuator's environment dump.
+var exposurePaths = []string{
+	"/.env", "/.env.local", "/.env.production", "/.env.development", "/.env.backup",
+	"/.git/config", "/.git/HEAD",
+	"/swagger.json", "/swagger/v1/swagger.json", "/openapi.json", "/api-docs", "/v2/api-docs", "/v3/api-docs", "/api/swagger.json", "/api/openapi.json",
+	"/actuator/env", "/actuator/configprops", "/actuator/health",
+	"/debug/vars", "/server-status",
+}
+
+// seedPaths returns the probe URLs for a target's origin.
+func seedPaths(target string, paths []string) []string {
 	u, err := url.Parse(target)
 	if err != nil {
 		return nil
 	}
 	origin := u.Scheme + "://" + u.Host
-	out := make([]string, 0, len(configPaths))
-	for _, p := range configPaths {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
 		out = append(out, origin+p)
 	}
 	return out
 }
+
+// configSeeds returns the config probe URLs for a target's origin.
+func configSeeds(target string) []string { return seedPaths(target, configPaths) }
 
 // buildHTTPConfig assembles the per-request identity (custom User-Agent and
 // extra headers) applied to every outbound request. Each --header is "Key:

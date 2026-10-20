@@ -304,3 +304,60 @@ func TestHeadlessSubresourcesArePaced(t *testing.T) {
 		t.Errorf("three paced sub-resources finished in %v, want at least %v", elapsed, 3*interval)
 	}
 }
+
+// TestHeadlessCapturesStorageCookiesAndGlobals: values the page writes to
+// localStorage and sessionStorage, the cookies the browser holds (HttpOnly
+// included), and a framework global are returned as state blobs.
+func TestHeadlessCapturesStorageCookiesAndGlobals(t *testing.T) {
+	requireBrowser(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "session=eyJsess; HttpOnly; Path=/")
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><script>
+			localStorage.setItem("authToken", "ls-token-value-1234567890");
+			sessionStorage.setItem("csrf", "ss-value");
+			window.__APP_CONFIG__ = {apiKey: "cfg-key-value-1234567890", nested: {deep: true}};
+			window.notListed = {secret: "ignored"};
+		</script></html>`))
+	}))
+	defer srv.Close()
+
+	r := NewHeadlessRenderer(20*time.Second, HTTPConfig{}).SetCaptureState(true)
+	defer r.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := r.Render(ctx, srv.URL+"/")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	byPath := map[string]string{}
+	for _, b := range res.JSBlobs {
+		if b.Source == "state" {
+			byPath[b.Path[strings.Index(b.Path, "#"):]] = b.Body
+		}
+	}
+	if !strings.Contains(byPath["#localStorage"], "authToken=ls-token-value-1234567890") {
+		t.Errorf("localStorage blob %q", byPath["#localStorage"])
+	}
+	if !strings.Contains(byPath["#sessionStorage"], "csrf=ss-value") {
+		t.Errorf("sessionStorage blob %q", byPath["#sessionStorage"])
+	}
+	if !strings.Contains(byPath["#cookies"], "session=eyJsess") || !strings.Contains(byPath["#cookies"], "HttpOnly") {
+		t.Errorf("cookies blob %q", byPath["#cookies"])
+	}
+	if !strings.Contains(byPath["#window.__APP_CONFIG__"], `"apiKey":"cfg-key-value-1234567890"`) {
+		t.Errorf("global blob %q", byPath["#window.__APP_CONFIG__"])
+	}
+	if _, ok := byPath["#window.notListed"]; ok {
+		t.Error("an unlisted global was captured")
+	}
+	off, err := NewHeadlessRenderer(20*time.Second, HTTPConfig{}).Render(ctx, srv.URL+"/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range off.JSBlobs {
+		if b.Source == "state" {
+			t.Errorf("state captured with the option off: %s", b.Path)
+		}
+	}
+}

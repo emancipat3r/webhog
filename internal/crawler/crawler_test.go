@@ -332,3 +332,43 @@ func TestCrawlRedirectOffDomainDoesNotCrawlLanding(t *testing.T) {
 		t.Errorf("requested %d URLs, want 1 (seed only): %v", len(fake.requested), fake.requested)
 	}
 }
+
+func TestOnePerShapeCrawlsOneRecordPerTemplate(t *testing.T) {
+	f := newFake()
+	f.pages["https://example.com/"] = `<a href="/item/1">1</a><a href="/item/2">2</a><a href="/item/3">3</a><a href="/about">about</a><a href="/item/1?ref=x">1x</a><a href="/doc/0123456789abcdef0123">doc</a><a href="/doc/fedcba9876543210fedc">doc2</a>`
+	for _, p := range []string{"/item/1", "/item/2", "/item/3", "/about", "/item/1?ref=x", "/doc/0123456789abcdef0123", "/doc/fedcba9876543210fedc"} {
+		f.pages["https://example.com"+p] = "<html></html>"
+	}
+	c := New(f, 1, 0, true, time.Second, nil).SetOnePerShape(true)
+	got := collect(c, "https://example.com/")
+	want := map[string]bool{"https://example.com/": true, "https://example.com/item/1": true, "https://example.com/about": true, "https://example.com/item/1?ref=x": true, "https://example.com/doc/0123456789abcdef0123": true}
+	if len(got) != len(want) {
+		t.Errorf("crawled %v, want one per shape: %v", got, want)
+	}
+	for _, u := range got {
+		if !want[u] {
+			t.Errorf("unexpected %s", u)
+		}
+	}
+	if c.ShapeSkipped() != 3 {
+		t.Errorf("ShapeSkipped = %d, want 3", c.ShapeSkipped())
+	}
+	all := New(f, 1, 0, true, time.Second, nil)
+	if n := len(collect(all, "https://example.com/")); n != 8 {
+		t.Errorf("without the option %d pages, want 8", n)
+	}
+}
+
+func TestPatternKey(t *testing.T) {
+	a := patternKey("https://x.test/users/42/posts/550e8400-e29b-41d4-a716-446655440000?page=2&sort=asc")
+	b := patternKey("https://x.test/users/7/posts/123e4567-e89b-12d3-a456-426614174000?sort=desc&page=9")
+	if a != b {
+		t.Errorf("%q != %q", a, b)
+	}
+	if patternKey("https://x.test/users/42") == patternKey("https://x.test/users/42/edit") {
+		t.Error("different paths share a key")
+	}
+	if patternKey("https://x.test/v2/users") == patternKey("https://x.test/v3/users") {
+		t.Error("short alphanumeric segments must stay distinct")
+	}
+}

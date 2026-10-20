@@ -331,3 +331,88 @@ func TestMapCommentTakesTheLastOne(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// TestWaybackFetchesHistoricalScripts: the CDX index names three scripts;
+// one is still loaded by the live page and is skipped, one is fetched
+// live, one is gone from the host and recorded as refused. With Archived
+// the copies come from the archive and the host sees no request.
+func TestWaybackFetchesHistoricalScripts(t *testing.T) {
+	var archiveHits, liveOld int
+	var cdx *httptest.Server
+	app := newSite(t, map[string]page{
+		"/":              {ctype: "text/html", body: `<html><script src="/static/app.js"></script></html>`},
+		"/static/app.js": {body: `var live = 1;`},
+		"/static/old.js": {body: `var old = "ghp_` + strings.Repeat("Ab1", 12) + `";`},
+	})
+	cdx = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/cdx/search/cdx"):
+			if r.URL.Query().Get("url") == "" || !strings.Contains(r.URL.Query()["filter"][0], "javascript") {
+				t.Errorf("unexpected CDX query %s", r.URL.RawQuery)
+			}
+			rows := [][]string{{"original", "timestamp", "statuscode"},
+				{app.URL + "/static/app.js", "20240101000000", "200"},
+				{app.URL + "/static/old.js", "20230601000000", "200"},
+				{app.URL + "/static/gone.js", "20220101000000", "200"},
+				{app.URL + "/static/old.js", "20230101000000", "200"},
+				{app.URL + "/page.html", "20230101000000", "200"},
+			}
+			_ = json.NewEncoder(w).Encode(rows)
+		case strings.HasPrefix(r.URL.Path, "/web/"):
+			archiveHits++
+			_, _ = w.Write([]byte(`var archived = "AIza` + `SyA-9dZ3l8Bx_qWmEr0tUvWxYz12-Ab34Cd";`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(cdx.Close)
+
+	res, e := render(t, app, "/", Options{Wayback: true, WaybackBase: cdx.URL})
+	liveOld = app.hit("/static/old.js")
+	wb := paths(res, "wayback")
+	if !has(wb, "/static/old.js") || !has(wb, "/static/gone.js") || has(wb, "/static/app.js") || has(wb, "page.html") {
+		t.Errorf("wayback blobs %v", wb)
+	}
+	if liveOld != 1 || app.hit("/static/app.js") != 1 {
+		t.Errorf("live fetches: old.js %d (want 1), app.js %d (want 1)", liveOld, app.hit("/static/app.js"))
+	}
+	if st := e.Stats(); st.WaybackFetched != 2 {
+		t.Errorf("WaybackFetched = %d, want 2", st.WaybackFetched)
+	}
+	var gone bool
+	for _, b := range res.JSBlobs {
+		if strings.HasSuffix(b.Path, "/static/gone.js") && b.Status == 404 {
+			gone = true
+		}
+	}
+	if !gone {
+		t.Error("a script gone from the host should be a 404 blob")
+	}
+	found := scanner.NewScanner(scanner.Options{}).Scan(res)
+	if len(found) == 0 || found[0].Detector != "GitHub Personal Access Token" {
+		t.Errorf("secret in the historical script not found: %v", found)
+	}
+
+	// Archived copies: the host is not asked for them at all.
+	before := app.hit("/static/old.js")
+	res, _ = render(t, app, "/", Options{Wayback: true, WaybackArchived: true, WaybackBase: cdx.URL})
+	if app.hit("/static/old.js") != before || archiveHits != 2 {
+		t.Errorf("archived mode: host hits %d (want %d), archive hits %d (want 2)", app.hit("/static/old.js"), before, archiveHits)
+	}
+	arch := paths(res, "wayback-archived")
+	if !has(arch, "/static/old.js#archived-20230601000000") {
+		t.Errorf("archived blobs %v", arch)
+	}
+	// Second page of the same target: the index is not asked again.
+	app.pages["/two"] = page{ctype: "text/html", body: `<html></html>`}
+	e2 := New(renderer.NewStaticRenderer(5*time.Second, renderer.HTTPConfig{}), NewFetcher(5*time.Second, renderer.HTTPConfig{}, 0), Options{Wayback: true, WaybackBase: cdx.URL, MaxWayback: 1})
+	if _, err := e2.Render(context.Background(), app.URL+"/"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e2.Render(context.Background(), app.URL+"/two"); err != nil {
+		t.Fatal(err)
+	}
+	if st := e2.Stats(); st.WaybackFetched != 1 {
+		t.Errorf("MaxWayback 1 across two pages: fetched %d", st.WaybackFetched)
+	}
+}

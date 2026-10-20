@@ -25,6 +25,7 @@ type HeadlessRenderer struct {
 	timeout time.Duration // page load budget (navigation through window.onload)
 	domWait time.Duration // settle period after load for late JS and fetches
 	httpCfg HTTPConfig
+	state   bool // capture storages, cookies and framework globals after settle
 
 	// Process-wide browser, launched on first use. Shared by every session.
 	mu        sync.Mutex
@@ -61,6 +62,14 @@ func NewHeadlessRenderer(timeout time.Duration, httpCfg HTTPConfig) *HeadlessRen
 const DefaultDOMWait = 3 * time.Second
 
 // SetDOMWait overrides the post-load settle period. Zero disables it.
+// SetCaptureState turns on the capture of localStorage, sessionStorage,
+// cookies and framework globals after each page settles. The values are
+// returned as blobs with Source "state".
+func (h *HeadlessRenderer) SetCaptureState(on bool) *HeadlessRenderer {
+	h.state = on
+	return h
+}
+
 func (h *HeadlessRenderer) SetDOMWait(d time.Duration) *HeadlessRenderer {
 	if d < 0 {
 		d = 0
@@ -259,6 +268,9 @@ func (h *HeadlessRenderer) renderPage(page *rod.Page, targetURL string) (*Render
 	bodies.wait(page.GetContext())
 	external, resourceErrs := bodies.blobs()
 	jsBlobs = append(jsBlobs, external...)
+	if h.root().state {
+		jsBlobs = append(jsBlobs, capturedState(page, finalURL)...)
+	}
 
 	status, headers := readResponse()
 

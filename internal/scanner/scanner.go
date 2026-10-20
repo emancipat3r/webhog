@@ -355,7 +355,10 @@ func (s *Scanner) scanBlob(blob renderer.JSBlob, loadedFrom string) []Finding {
 					continue
 				}
 
-				token := match[1]
+				token := firstGroup(match)
+				if token == "" {
+					continue
+				}
 				if detector.Type == DetectorGeneric && !genericLooksLikeACredential(token) {
 					continue
 				}
@@ -384,6 +387,17 @@ func (s *Scanner) scanBlob(blob renderer.JSBlob, loadedFrom string) []Finding {
 	}
 
 	return capGeneric(dropGenericDuplicates(findings, s.namedTokens), s.genericCap)
+}
+
+// firstGroup returns the first non-empty capture group of a match, so a
+// detector may be written as alternatives that each capture the token.
+func firstGroup(match []string) string {
+	for _, g := range match[1:] {
+		if g != "" {
+			return g
+		}
+	}
+	return ""
 }
 
 // isThirdParty reports whether a fetched resource is served from a registered

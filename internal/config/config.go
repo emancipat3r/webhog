@@ -14,6 +14,9 @@ type Config struct {
 	Mode           string // static, headless or auto
 	Redact         bool   // mask tokens in every output
 	ProbeConfig    bool   // seed well-known config file paths
+	ProbeExposures bool   // seed env files, git config, API specs, actuator
+	CaptureState   bool   // headless: capture storages, cookies and globals
+	ShapesOnce     bool   // crawl one URL per path shape
 	Timeout        time.Duration
 	DOMWait        time.Duration // headless: settle time after load
 	ListFile       string
@@ -42,6 +45,9 @@ type Config struct {
 	MaxMapSize      int64 // cap on one map download in bytes
 	Chunks          bool  // discover and fetch lazily loaded chunks
 	MaxChunks       int   // cap on chunks fetched per target
+	Wayback         bool  // fetch historical scripts the Wayback Machine knows
+	WaybackArchived bool  // from the archive rather than the live host
+	MaxWayback      int   // cap per target
 
 	// Detector selection and noise control.
 	Detectors        []string // run only these detectors (names or type words)

@@ -25,17 +25,19 @@ type Report struct {
 	// The landing page was fetched and scanned because it is where the seed
 	// leads, but none of its links were crawled.
 	RedirectedOffScope bool              `json:"redirected_off_scope,omitempty"`
-	Status             int               `json:"status"`                      // seed HTTP status (0 if unknown)
-	PagesCrawled       int               `json:"pages_crawled"`               // number of pages successfully scanned
-	JSBlobs            int               `json:"js_blobs"`                    // total JS blobs across all pages
-	JSRefused          int               `json:"js_refused"`                  // external resources that failed to load or returned 4xx/5xx
-	JSDeduped          int               `json:"js_deduped,omitempty"`        // fetched resources skipped because an identical body was already scanned
-	JSChunks           int               `json:"js_chunks,omitempty"`         // lazily loaded chunks discovered from the bundler runtime and fetched
-	ChunksCapped       int               `json:"js_chunks_capped,omitempty"`  // chunk candidates not fetched because of --max-chunks
-	SourceMapsTried    int               `json:"source_maps_tried,omitempty"` // map URLs requested (referenced or probed)
-	SourceMaps         int               `json:"source_maps,omitempty"`       // of those, reachable source maps
-	Technologies       []string          `json:"technologies"`                // union of detected technologies
-	Findings           []scanner.Finding `json:"findings"`                    // deduplicated findings
+	Status             int               `json:"status"`                             // seed HTTP status (0 if unknown)
+	PagesCrawled       int               `json:"pages_crawled"`                      // number of pages successfully scanned
+	JSBlobs            int               `json:"js_blobs"`                           // total JS blobs across all pages
+	JSRefused          int               `json:"js_refused"`                         // external resources that failed to load or returned 4xx/5xx
+	JSDeduped          int               `json:"js_deduped,omitempty"`               // fetched resources skipped because an identical body was already scanned
+	JSChunks           int               `json:"js_chunks,omitempty"`                // lazily loaded chunks discovered from the bundler runtime and fetched
+	ChunksCapped       int               `json:"js_chunks_capped,omitempty"`         // chunk candidates not fetched because of --max-chunks
+	SourceMapsTried    int               `json:"source_maps_tried,omitempty"`        // map URLs requested (referenced or probed)
+	SourceMaps         int               `json:"source_maps,omitempty"`              // of those, reachable source maps
+	WaybackScripts     int               `json:"wayback_scripts,omitempty"`          // historical scripts fetched via the Wayback Machine
+	PagesSkippedShape  int               `json:"pages_skipped_same_shape,omitempty"` // crawl candidates skipped because a URL of the same shape was crawled
+	Technologies       []string          `json:"technologies"`                       // union of detected technologies
+	Findings           []scanner.Finding `json:"findings"`                           // deduplicated findings
 	// Scripts lists every fetched resource with its body hash, so a later
 	// run can tell which scripts changed. Inline scripts and page bodies are
 	// not listed; they are part of the page.
@@ -413,6 +415,12 @@ func (o *Outputter) buildSummary(report *Report) string {
 	}
 	if report.SourceMapsTried > 0 {
 		b.WriteString(fmt.Sprintf("Source Maps: %d of %d tried\n", report.SourceMaps, report.SourceMapsTried))
+	}
+	if report.WaybackScripts > 0 {
+		b.WriteString(fmt.Sprintf("Wayback Scripts: %d\n", report.WaybackScripts))
+	}
+	if report.PagesSkippedShape > 0 {
+		b.WriteString(fmt.Sprintf("Pages Skipped (same shape): %d\n", report.PagesSkippedShape))
 	}
 	if report.NewFindings != nil {
 		b.WriteString(fmt.Sprintf("New Since Baseline: %d findings", *report.NewFindings))

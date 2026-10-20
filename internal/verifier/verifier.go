@@ -98,6 +98,9 @@ func New(timeout time.Duration) *Verifier {
 		"Google API Key":               verifyGoogleAPIKey,
 		"Firebase Config":              verifyFirebaseConfig,
 		"Firebase Database URL":        verifyFirebaseDatabase,
+		"AWS S3 Bucket":                verifyBucketListing,
+		"Google Cloud Storage Bucket":  verifyBucketListing,
+		"Azure Blob Container":         verifyBucketListing,
 	}
 	return v
 }

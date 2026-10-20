@@ -40,6 +40,12 @@ func enrich(f *Finding, line string) {
 	switch f.Detector {
 	case "Firebase Config":
 		f.Details = firebaseConfigDetails(line)
+	case "AWS S3 Bucket":
+		f.Details = map[string]string{"bucket": f.Token, "listing_url": "https://" + f.Token + ".s3.amazonaws.com/?max-keys=1"}
+	case "Google Cloud Storage Bucket":
+		f.Details = map[string]string{"bucket": f.Token, "listing_url": "https://storage.googleapis.com/storage/v1/b/" + f.Token + "/o?maxResults=1"}
+	case "Azure Blob Container":
+		f.Details = map[string]string{"container": f.Token, "listing_url": "https://" + f.Token + "?restype=container&comp=list&maxresults=1"}
 	case "JWT Token":
 		f.Details = jwtDetails(f.Token)
 	case "AWS Access Key ID":

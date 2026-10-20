@@ -609,6 +609,46 @@ func GetDetectors() []Detector {
 			Keyword: "sql",
 		},
 
+		// ---- Cloud storage the app references ----
+		{
+			Name:    "AWS S3 Bucket",
+			Type:    DetectorConfig,
+			Re:      regexp.MustCompile(`(?i)(?:https?:)?//([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com|(?:https?:)?//s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com/([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])`),
+			Keyword: "amazonaws.com",
+		},
+		{
+			Name:    "Google Cloud Storage Bucket",
+			Type:    DetectorConfig,
+			Re:      regexp.MustCompile(`(?i)(?:https?:)?//storage\.googleapis\.com/([a-z0-9][a-z0-9._-]{1,61}[a-z0-9])|(?:https?:)?//([a-z0-9][a-z0-9._-]{1,61}[a-z0-9])\.storage\.googleapis\.com`),
+			Keyword: "storage.googleapis.com",
+		},
+		{
+			Name:    "Azure Blob Container",
+			Type:    DetectorConfig,
+			Re:      regexp.MustCompile(`(?i)https?://([a-z0-9]{3,24}\.blob\.core\.windows\.net/[a-z0-9][a-z0-9-]{1,61}[a-z0-9])`),
+			Keyword: ".blob.core.windows.net/",
+		},
+
+		// ---- Exposed files ----
+		{
+			Name:    "Git Config Exposed",
+			Type:    DetectorConfig,
+			Re:      regexp.MustCompile(`(\[remote "[^"]+"\])`),
+			Keyword: "[remote \"",
+		},
+		{
+			Name:    "API Specification",
+			Type:    DetectorConfig,
+			Re:      regexp.MustCompile(`("(?:openapi|swagger)"\s*:\s*"[0-9][0-9.]*")`),
+			Keyword: "\"",
+		},
+		{
+			Name:    "Spring Actuator Env",
+			Type:    DetectorConfig,
+			Re:      regexp.MustCompile(`("propertySources"\s*:\s*\[)`),
+			Keyword: "propertysources",
+		},
+
 		// ---- Endpoints ----
 		{
 			Name: "Relative URL",

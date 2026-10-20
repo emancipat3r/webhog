@@ -207,7 +207,7 @@ func TestEveryRegisteredCheckIsReadOnly(t *testing.T) {
 		v.SetBase(origin, srv.URL)
 	}
 	for name := range v.checks {
-		f := scanner.Finding{Detector: name, Token: "glpat-x-us1", Details: map[string]string{"project_id": "p"}}
+		f := scanner.Finding{Detector: name, Token: "glpat-x-us1", Details: map[string]string{"project_id": "p", "listing_url": srv.URL + "/bucket"}}
 		if name == "Discord Webhook" || name == "Firebase Database URL" {
 			f.Token = srv.URL + "/hook"
 		}
@@ -227,5 +227,32 @@ func TestEveryRegisteredCheckIsReadOnly(t *testing.T) {
 		if strings.Contains(c, "127.0.0.1") == false && strings.Contains(c, "localhost") == false {
 			t.Errorf("call escaped the test server: %s", c)
 		}
+	}
+}
+
+func TestBucketListingOutcomes(t *testing.T) {
+	v := New(time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open":
+			_, _ = w.Write([]byte(`<?xml version="1.0"?><ListBucketResult><Name>open</Name></ListBucketResult>`))
+		case "/closed":
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	check := func(path string) Result {
+		return v.Verify(t.Context(), scanner.Finding{Detector: "AWS S3 Bucket", Token: "x", Details: map[string]string{"listing_url": srv.URL + path}})
+	}
+	if r := check("/open"); r.Status != scanner.VerifyValid || r.Details["public_listing"] != "true" {
+		t.Errorf("open: %+v", r)
+	}
+	if r := check("/closed"); r.Status != scanner.VerifyInvalid {
+		t.Errorf("closed: %+v", r)
+	}
+	if r := check("/missing"); r.Status != scanner.VerifyUnknown || r.Details["unclaimed"] != "true" {
+		t.Errorf("missing: %+v", r)
 	}
 }

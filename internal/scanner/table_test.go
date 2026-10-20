@@ -107,3 +107,29 @@ func TestKeywordPrefilterAgreesWithRegex(t *testing.T) {
 		}
 	}
 }
+
+// TestCloudStorageAndExposedFileShapes covers the detectors ported from
+// the surface-discovery ideas: bucket references in either URL style, and
+// the files that mark an exposure.
+func TestCloudStorageAndExposedFileShapes(t *testing.T) {
+	cases := []struct{ detector, input, want string }{
+		{"AWS S3 Bucket", `src="https://acme-uploads.s3.us-east-1.amazonaws.com/a.png"`, "acme-uploads"},
+		{"AWS S3 Bucket", `"https://s3.amazonaws.com/acme-backups/db.sql"`, "acme-backups"},
+		{"Google Cloud Storage Bucket", `https://storage.googleapis.com/acme-static/app.js`, "acme-static"},
+		{"Google Cloud Storage Bucket", `//acme-media.storage.googleapis.com/x`, "acme-media"},
+		{"Azure Blob Container", `https://acmeprod.blob.core.windows.net/uploads/x.pdf`, "acmeprod.blob.core.windows.net/uploads"},
+		{"Git Config Exposed", "[remote \"origin\"]\n\turl = https://github.com/acme/app", `[remote "origin"]`},
+		{"API Specification", `{"openapi": "3.0.1", "paths": {}}`, `"openapi": "3.0.1"`},
+		{"Spring Actuator Env", `{"activeProfiles":["prod"],"propertySources":[{"name":"systemEnvironment"}]}`, `"propertySources":[`},
+	}
+	for _, c := range cases {
+		got := scanBody(Options{Include: []string{c.detector}}, "https://www.example.com/a.js", c.input)
+		if len(got) == 0 || got[0].Token != c.want {
+			t.Errorf("%s: %q -> %v, want token %q", c.detector, c.input, names(got), c.want)
+			continue
+		}
+		if c.detector == "AWS S3 Bucket" && got[0].Details["listing_url"] != "https://"+c.want+".s3.amazonaws.com/?max-keys=1" {
+			t.Errorf("S3 listing url %q", got[0].Details["listing_url"])
+		}
+	}
+}

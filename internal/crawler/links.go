@@ -2,6 +2,8 @@ package crawler
 
 import (
 	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/emancipat3r/webhog/internal/renderer"
@@ -95,4 +97,38 @@ func anchorHrefs(htmlContent string) []string {
 	visit(doc)
 
 	return hrefs
+}
+
+var (
+	numericSegment = regexp.MustCompile(`^[0-9]+$`)
+	uuidSegment    = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	hexSegment     = regexp.MustCompile(`(?i)^[0-9a-f]{16,}$`)
+)
+
+// patternKey reduces a URL to the shape of its path and the names of its
+// query parameters: numeric, UUID and long hex segments become
+// placeholders and parameter values are dropped. Two URLs with the same key
+// are two records rendered by one template, which load the same scripts.
+func patternKey(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	segs := strings.Split(strings.TrimRight(u.Path, "/"), "/")
+	for i, seg := range segs {
+		switch {
+		case numericSegment.MatchString(seg):
+			segs[i] = "{n}"
+		case uuidSegment.MatchString(seg):
+			segs[i] = "{uuid}"
+		case hexSegment.MatchString(seg):
+			segs[i] = "{hex}"
+		}
+	}
+	var names []string
+	for k := range u.Query() {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return strings.ToLower(u.Scheme+"://"+u.Host) + strings.Join(segs, "/") + "?" + strings.Join(names, "&")
 }

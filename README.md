@@ -61,6 +61,27 @@ Inspired by the [TruffleHog browser extension](https://github.com/trufflesecurit
     `importScripts` and a service worker's precache manifest. Route code the
     landing page never loads is scanned anyway.
 
+- **Page State** (headless and auto)
+  - After each page settles, localStorage, sessionStorage, the browser's
+    cookies (HttpOnly ones included) and the framework globals that carry
+    server state and runtime configuration (`__NEXT_DATA__`, `__NUXT__`,
+    `__INITIAL_STATE__`, `__APP_CONFIG__`, `__ENV__`, `firebaseConfig` and
+    others) are read and scanned. Values an app writes at runtime are in no
+    response body.
+
+- **Historical Scripts** (`--wayback`)
+  - The Wayback Machine's index is asked for the scripts it captured under
+    the target's host; the ones the live page no longer loads are fetched,
+    live or from the archive. Old bundles carry keys that were rotated out of
+    the current ones.
+
+- **Cloud Storage and Exposed Files**
+  - Bucket references in either URL style (S3, Google Cloud Storage, Azure
+    Blob) are findings; `--verify` asks the service for one object and
+    reports whether the bucket lists publicly or is unclaimed.
+    `--probe-exposures` seeds `.env`, `.git/config`, API specifications and
+    the Spring actuator environment, with detectors that recognise each.
+
 - **Third Party and Deduplication**
   - A script served from another registered domain is labelled
     `third_party`; `--first-party-only` skips mining it. A byte-identical body
@@ -235,6 +256,31 @@ webhog scan --exclude-detectors generic,"HTTP URL" https://example.com
 Names are matched case-insensitively; the words `secret`, `config`,
 `endpoint` and `generic` select a whole type. An unknown name is an error
 before any request is made.
+
+### Historical Scripts from the Wayback Machine
+
+```bash
+webhog scan --wayback https://app.example.com              # fetch the live URLs the index names
+webhog scan --wayback --wayback-archived https://app.example.com   # fetch the archived copies instead
+```
+
+The CDX index is asked once per target for JavaScript captured under the
+host. Scripts the live page already loads are skipped; the rest are fetched
+from the host (a script that is gone is a 404 blob, counted as refused) or,
+with `--wayback-archived`, from `web.archive.org`, in which case the target
+sees no request for them. Findings carry the original URL, with
+`#archived-<timestamp>` appended for archive copies. `--max-wayback`
+(default 100) caps the fetches. The index query goes to archive.org, not
+the target.
+
+### Crawl One Record per Template
+
+`--shapes-once` (default on) treats `/item/1` and `/item/2` as one path
+shape (numeric, UUID and long hex segments are placeholders, query values
+are ignored) and crawls the first URL of each. A template loads the same
+scripts whichever record it shows, so the page budget goes to different
+templates instead. The summary counts the candidates skipped. Pass
+`--shapes-once=false` to crawl every URL.
 
 ### Probe Runtime Configuration
 
@@ -481,6 +527,9 @@ webhog scan --json https://example.com | jq '.findings[] | select(.type=="secret
 - `--same-domain`: Restrict the crawl to the seed's registered (apex) domain (default: true; e.g. `api.example.com` and `www.example.com` both count for a seed on `example.com`). Set `--same-domain=false` to follow off-domain links too.
 - `--robots`: Use `robots.txt` as an enumeration source — scan its `Disallow`/`Allow` paths and `Sitemap:` URLs (default: false). Does **not** honor crawl restrictions; authorized targets only.
 - `--probe-config`: Also scan the well-known runtime configuration paths as seeds (default: false)
+- `--probe-exposures`: Also scan `.env`, `.git/config`, API specification and actuator paths as seeds (default: false)
+- `--shapes-once`: Crawl one URL per path shape (default: true)
+- `--capture-state`: Headless and auto: read storages, cookies and framework globals after each page settles (default: true)
 
 **Expansion:**
 - `--source-maps`: Follow `sourceMappingURL` comments and mine the sources a map embeds (default: true)
@@ -489,6 +538,9 @@ webhog scan --json https://example.com | jq '.findings[] | select(.type=="secret
 - `--max-map-size`: Largest source map to download, in bytes (default: 64 MiB)
 - `--chunks`: Discover lazily loaded chunks from the bundler runtime and fetch them (default: true)
 - `--max-chunks`: Chunks to fetch per target at most (default: 200)
+- `--wayback`: Fetch the scripts the Wayback Machine captured under the host that the live page no longer loads (default: false)
+- `--wayback-archived`: With `--wayback`, fetch the archived copies instead of the live URLs (default: false)
+- `--max-wayback`: Historical scripts to fetch per target at most (default: 100)
 
 **Detection:**
 - `--verify`: Validate detected secrets against provider APIs (read-only). Makes outbound requests using the discovered credentials — only use against targets you're authorized to test.
@@ -529,7 +581,9 @@ credential.
 
 ### Configuration
 Firebase configs and database URLs; connection strings (PostgreSQL, MySQL,
-MongoDB, Redis, AMQP, SQL Server); exposed source maps.
+MongoDB, Redis, AMQP, SQL Server); S3, Google Cloud Storage and Azure Blob
+references; exposed source maps, git configs, API specifications and Spring
+actuator environments.
 
 ### Endpoints
 HTTP/HTTPS URLs and relative paths, WebSocket URLs, API endpoints
@@ -545,7 +599,7 @@ baseline) and `overflow` (matches not listed because of `--generic-cap`).
 
 Each report carries the counters `pages_crawled`, `js_blobs`, `js_refused`,
 `js_deduped`, `js_chunks`, `js_chunks_capped`, `source_maps_tried`,
-`source_maps`, the `scripts` list (path, source, status, SHA-256, size,
+`source_maps`, `wayback_scripts`, `pages_skipped_same_shape`, the `scripts` list (path, source, status, SHA-256, size,
 third party), and against a baseline `new_findings` and `script_changes`.
 
 ## Architecture

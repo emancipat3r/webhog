@@ -37,6 +37,8 @@ type Crawler struct {
 	perPage     time.Duration // per-page render timeout
 	extraLinks  LinkFunc      // optional source of additional crawl targets
 	concurrency int           // pages rendered at once (>= 1)
+	onePerShape bool          // crawl one URL per path shape (see patternKey)
+	skipped     int           // candidates not crawled because their shape was seen
 }
 
 // New creates a Crawler. extraLinks may be nil, in which case only <a href>
@@ -65,6 +67,20 @@ func (c *Crawler) SetConcurrency(n int) *Crawler {
 	return c
 }
 
+// SetOnePerShape makes the crawler fetch only the first URL of each path
+// shape: /item/1 and /item/2 are one template, and a template loads the
+// same scripts whichever record it shows. Seeds are always fetched.
+func (c *Crawler) SetOnePerShape(on bool) *Crawler {
+	c.onePerShape = on
+	return c
+}
+
+// ShapeSkipped returns how many candidates were not crawled because a URL
+// of the same shape had already been queued.
+func (c *Crawler) ShapeSkipped() int {
+	return c.skipped
+}
+
 // Crawl renders the given seeds and, up to maxDepth/maxPages, the pages
 // reachable from them (via anchors and any extraLinks), emitting one Page per
 // rendered URL on the returned channel. All seeds start at depth 0; the first
@@ -90,10 +106,12 @@ func (c *Crawler) Crawl(ctx context.Context, seeds ...string) <-chan Page {
 
 		var queue []item
 		visited := make(map[string]bool)
+		shapes := make(map[string]bool)
 		for _, s := range seeds {
 			n := normalizeURL(s)
 			if !visited[n] {
 				visited[n] = true
+				shapes[patternKey(n)] = true
 				queue = append(queue, item{url: n, depth: 0})
 			}
 		}
@@ -160,6 +178,14 @@ func (c *Crawler) Crawl(ctx context.Context, seeds ...string) <-chan Page {
 						continue
 					}
 					visited[n] = true
+					if c.onePerShape {
+						k := patternKey(n)
+						if shapes[k] {
+							c.skipped++
+							continue
+						}
+						shapes[k] = true
+					}
 					queue = append(queue, item{url: n, depth: r.depth + 1})
 				}
 			}

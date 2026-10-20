@@ -16,14 +16,21 @@ type Options struct {
 	MaxMapBytes   int64 // cap on one map download (0 = DefaultMaxMapBytes)
 	Chunks        bool  // discover and fetch lazily loaded chunks
 	MaxChunks     int   // cap on chunks fetched per target (0 = DefaultMaxChunks)
+	// Wayback asks the Wayback Machine for the scripts it captured under
+	// the target's host and fetches the ones the live page no longer loads.
+	Wayback         bool
+	WaybackArchived bool   // fetch the archived copies instead of the live URLs
+	MaxWayback      int    // cap per target (0 = DefaultMaxWayback)
+	WaybackBase     string // CDX and archive origin (tests)
 }
 
 // Stats counts what the expansion did for one target.
 type Stats struct {
-	ChunksFetched int // chunks fetched (any status)
-	ChunksCapped  int // chunk candidates not fetched because of MaxChunks
-	MapsTried     int // map URLs requested or decoded inline
-	MapsExposed   int // of those, real source maps
+	ChunksFetched  int // chunks fetched (any status)
+	ChunksCapped   int // chunk candidates not fetched because of MaxChunks
+	MapsTried      int // map URLs requested or decoded inline
+	MapsExposed    int // of those, real source maps
+	WaybackFetched int // historical scripts fetched (live or archived)
 }
 
 // Expander wraps a Renderer for one target: after each page renders it
@@ -38,6 +45,7 @@ type Expander struct {
 	seenMapScript map[string]bool
 	seenMapURL    map[string]bool
 	stats         Stats
+	waybackDone   bool
 	mu            sync.Mutex
 }
 
@@ -81,6 +89,9 @@ func (e *Expander) Render(ctx context.Context, targetURL string) (*renderer.Rend
 func (e *Expander) Expand(ctx context.Context, res *renderer.RenderResult) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.opts.Wayback {
+		e.waybackFor(ctx, res)
+	}
 	if e.opts.Chunks {
 		e.chunksFor(ctx, res)
 	}

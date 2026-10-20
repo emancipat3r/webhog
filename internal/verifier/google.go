@@ -159,3 +159,28 @@ func verifyFirebaseConfig(ctx context.Context, v *Verifier, f scanner.Finding) R
 	}
 	return Result{Status: scanner.VerifyUnknown, Details: d}
 }
+
+// verifyBucketListing asks the storage service for one object of a bucket
+// the application references. 200 with a listing means anyone can
+// enumerate it; 403 means it exists and is closed; 404 means the name is
+// unclaimed, which for a bucket the app still points at is its own finding.
+func verifyBucketListing(ctx context.Context, v *Verifier, f scanner.Finding) Result {
+	u := f.Details["listing_url"]
+	if u == "" {
+		return unknown()
+	}
+	code, body, _, err := v.do(ctx, request{url: u})
+	if err != nil {
+		return unknown()
+	}
+	text := string(body)
+	switch {
+	case code == http.StatusOK && (strings.Contains(text, "<ListBucketResult") || strings.Contains(text, "<EnumerationResults") || strings.Contains(text, "\"kind\": \"storage#objects\"") || strings.Contains(text, "\"kind\":\"storage#objects\"")):
+		return Result{Status: scanner.VerifyValid, Details: map[string]string{"public_listing": "true"}}
+	case code == http.StatusForbidden || code == http.StatusUnauthorized:
+		return Result{Status: scanner.VerifyInvalid, Details: map[string]string{"public_listing": "false"}}
+	case code == http.StatusNotFound:
+		return Result{Status: scanner.VerifyUnknown, Details: map[string]string{"public_listing": "false", "unclaimed": "true"}}
+	}
+	return unknown()
+}
