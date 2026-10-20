@@ -1,11 +1,38 @@
 package scanner
 
 import (
+	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/emancipat3r/webhog/internal/renderer"
 )
+
+// DefaultGenericCap is the default number of matches one Generic detector may
+// report from one file before the rest are counted instead of listed.
+const DefaultGenericCap = 20
+
+// Options configures a Scanner.
+type Options struct {
+	IncludeEntropy bool
+	MinEntropy     float64
+	MinLength      int
+	// Include restricts scanning to the named detectors (case-insensitive
+	// detector names, or the type words secret, config, endpoint, generic).
+	// Empty means every detector.
+	Include []string
+	// Exclude removes the named detectors (same vocabulary as Include).
+	Exclude []string
+	// GenericCap caps how many matches each Generic detector reports from one
+	// file; 0 means DefaultGenericCap, a negative value disables the cap.
+	GenericCap int
+	// ScopeDomain is the registered domain of the scan target. When set,
+	// findings in resources served from another registered domain are marked
+	// third party, and FirstPartyOnly skips those resources entirely.
+	ScopeDomain    string
+	FirstPartyOnly bool
+}
 
 // Scanner scans rendered pages for secrets and endpoints
 type Scanner struct {
@@ -13,16 +40,133 @@ type Scanner struct {
 	includeEntropy bool
 	minEntropy     float64
 	minLength      int
+	genericCap     int
+	scopeDomain    string
+	firstPartyOnly bool
+	anyKeyword     bool
+	seenBodies     map[string]string // body hash -> path first scanned under
+	deduped        int
 }
 
-// NewScanner creates a new scanner with the given configuration
-func NewScanner(includeEntropy bool, minEntropy float64, minLength int) *Scanner {
-	return &Scanner{
-		detectors:      GetDetectors(),
-		includeEntropy: includeEntropy,
-		minEntropy:     minEntropy,
-		minLength:      minLength,
+// NewScanner creates a new scanner with the given configuration. Unknown
+// names in Include or Exclude are reported by ValidateDetectorNames; here
+// they are ignored.
+func NewScanner(opts Options) *Scanner {
+	cap := opts.GenericCap
+	if cap == 0 {
+		cap = DefaultGenericCap
 	}
+	s := &Scanner{
+		detectors:      selectDetectors(GetDetectors(), opts.Include, opts.Exclude),
+		includeEntropy: opts.IncludeEntropy,
+		minEntropy:     opts.MinEntropy,
+		minLength:      opts.MinLength,
+		genericCap:     cap,
+		scopeDomain:    strings.ToLower(opts.ScopeDomain),
+		firstPartyOnly: opts.FirstPartyOnly,
+		seenBodies:     make(map[string]string),
+	}
+	for _, d := range s.detectors {
+		if d.Keyword != "" {
+			s.anyKeyword = true
+		}
+	}
+	return s
+}
+
+// Detectors returns the detectors this scanner runs, in order.
+func (s *Scanner) Detectors() []Detector {
+	return s.detectors
+}
+
+// typeWords are the shorthand names accepted in Include and Exclude for a
+// whole detector type.
+var typeWords = map[string]DetectorType{
+	"secret":    DetectorSecret,
+	"secrets":   DetectorSecret,
+	"config":    DetectorConfig,
+	"endpoint":  DetectorEndpoint,
+	"endpoints": DetectorEndpoint,
+	"generic":   DetectorGeneric,
+}
+
+// matchesName reports whether a detector is named by sel: its name, case-
+// insensitively, or its type word.
+func matchesName(d Detector, sel string) bool {
+	sel = strings.ToLower(strings.TrimSpace(sel))
+	if sel == "" {
+		return false
+	}
+	if t, ok := typeWords[sel]; ok {
+		return d.Type == t
+	}
+	return strings.ToLower(d.Name) == sel
+}
+
+// selectDetectors applies the include and exclude lists.
+func selectDetectors(all []Detector, include, exclude []string) []Detector {
+	var out []Detector
+	for _, d := range all {
+		keep := len(include) == 0
+		for _, sel := range include {
+			if matchesName(d, sel) {
+				keep = true
+				break
+			}
+		}
+		for _, sel := range exclude {
+			if matchesName(d, sel) {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// ValidateDetectorNames returns an error naming the first selector that
+// matches no detector and no type word, so a typo on the command line is
+// reported instead of silently scanning for nothing.
+func ValidateDetectorNames(selectors []string) error {
+	all := GetDetectors()
+	for _, sel := range selectors {
+		if strings.TrimSpace(sel) == "" {
+			continue
+		}
+		found := false
+		for _, d := range all {
+			if matchesName(d, sel) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("unknown detector %q (see webhog detectors)", sel)
+		}
+	}
+	return nil
+}
+
+// DetectorNames returns every detector name in table order.
+func DetectorNames() []string {
+	var names []string
+	for _, d := range GetDetectors() {
+		names = append(names, d.Name)
+	}
+	return names
+}
+
+// sortedDetails is a helper for deterministic output of Details maps.
+func sortedDetails(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Scan processes a RenderResult and returns all findings
@@ -150,11 +294,26 @@ func isFetchableEndpoint(token string) bool {
 func (s *Scanner) scanBlob(blob renderer.JSBlob, loadedFrom string) []Finding {
 	var findings []Finding
 
+	thirdParty := s.isThirdParty(blob)
+	if thirdParty && s.firstPartyOnly {
+		return nil
+	}
+	if s.alreadyScanned(blob) {
+		return nil
+	}
+
 	lines := strings.Split(blob.Body, "\n")
 
 	for lineNum, line := range lines {
+		var lower string
+		if s.anyKeyword {
+			lower = strings.ToLower(line)
+		}
 		// Run all detectors on this line
 		for _, detector := range s.detectors {
+			if detector.Keyword != "" && !strings.Contains(lower, detector.Keyword) {
+				continue
+			}
 			matches := detector.Re.FindAllStringSubmatch(line, -1)
 			for _, match := range matches {
 				if len(match) < 2 {
@@ -162,9 +321,12 @@ func (s *Scanner) scanBlob(blob renderer.JSBlob, loadedFrom string) []Finding {
 				}
 
 				token := match[1]
+				if detector.Type == DetectorGeneric && !genericLooksLikeACredential(token) {
+					continue
+				}
 				snippet := createSnippet(line, token)
 
-				findings = append(findings, Finding{
+				f := Finding{
 					Detector:   detector.Name,
 					Type:       detector.Type,
 					Path:       blob.Path,
@@ -172,7 +334,11 @@ func (s *Scanner) scanBlob(blob renderer.JSBlob, loadedFrom string) []Finding {
 					Snippet:    snippet,
 					Token:      token,
 					LoadedFrom: loadedFromPtr(loadedFrom),
-				})
+					Public:     detector.Public,
+					ThirdParty: thirdParty,
+				}
+				enrich(&f)
+				findings = append(findings, f)
 			}
 		}
 
@@ -182,7 +348,40 @@ func (s *Scanner) scanBlob(blob renderer.JSBlob, loadedFrom string) []Finding {
 		}
 	}
 
-	return findings
+	return capGeneric(findings, s.genericCap)
+}
+
+// isThirdParty reports whether a fetched resource is served from a registered
+// domain other than the scan target's. The page's own body and inline
+// scripts are never third party; without a scope domain nothing is.
+func (s *Scanner) isThirdParty(blob renderer.JSBlob) bool {
+	if s.scopeDomain == "" || blob.Source == "html" || blob.Source == "inline" {
+		return false
+	}
+	return !renderer.SameRegisteredDomain(s.scopeDomain, blob.Path)
+}
+
+// alreadyScanned records the blob's body hash and reports whether an
+// identical body was scanned before under another path (the same bundle
+// served from two URLs, or loaded by every page of a crawl). Findings are
+// reported once, under the first path; see ScanStats.
+func (s *Scanner) alreadyScanned(blob renderer.JSBlob) bool {
+	if blob.Source == "html" || blob.Source == "inline" || blob.Body == "" {
+		return false
+	}
+	h := renderer.BodyHash(blob.Body)
+	if _, seen := s.seenBodies[h]; seen {
+		s.deduped++
+		return true
+	}
+	s.seenBodies[h] = blob.Path
+	return false
+}
+
+// Deduped returns how many fetched resources were skipped because a byte-
+// identical body had already been scanned in this scanner's lifetime.
+func (s *Scanner) Deduped() int {
+	return s.deduped
 }
 
 // detectHighEntropy finds high-entropy strings that might be secrets

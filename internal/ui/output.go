@@ -24,12 +24,13 @@ type Report struct {
 	// The landing page was fetched and scanned because it is where the seed
 	// leads, but none of its links were crawled.
 	RedirectedOffScope bool              `json:"redirected_off_scope,omitempty"`
-	Status             int               `json:"status"`        // seed HTTP status (0 if unknown)
-	PagesCrawled       int               `json:"pages_crawled"` // number of pages successfully scanned
-	JSBlobs            int               `json:"js_blobs"`      // total JS blobs across all pages
-	JSRefused          int               `json:"js_refused"`    // external resources that failed to load or returned 4xx/5xx
-	Technologies       []string          `json:"technologies"`  // union of detected technologies
-	Findings           []scanner.Finding `json:"findings"`      // deduplicated findings
+	Status             int               `json:"status"`               // seed HTTP status (0 if unknown)
+	PagesCrawled       int               `json:"pages_crawled"`        // number of pages successfully scanned
+	JSBlobs            int               `json:"js_blobs"`             // total JS blobs across all pages
+	JSRefused          int               `json:"js_refused"`           // external resources that failed to load or returned 4xx/5xx
+	JSDeduped          int               `json:"js_deduped,omitempty"` // fetched resources skipped because an identical body was already scanned
+	Technologies       []string          `json:"technologies"`         // union of detected technologies
+	Findings           []scanner.Finding `json:"findings"`             // deduplicated findings
 }
 
 // Outputter handles formatting and displaying results
@@ -318,6 +319,9 @@ func (o *Outputter) buildSummary(report *Report) string {
 	b.WriteString(fmt.Sprintf("JS Blobs: %d\n", report.JSBlobs))
 	if report.JSRefused > 0 {
 		b.WriteString(fmt.Sprintf("JS Refused: %d\n", report.JSRefused))
+	}
+	if report.JSDeduped > 0 {
+		b.WriteString(fmt.Sprintf("JS Deduplicated: %d\n", report.JSDeduped))
 	}
 	b.WriteString(fmt.Sprintf("Total Findings: %d\n\n", len(findings)))
 

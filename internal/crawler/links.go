@@ -4,8 +4,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/emancipat3r/webhog/internal/renderer"
 	"golang.org/x/net/html"
-	"golang.org/x/net/publicsuffix"
 )
 
 // skipExtensions lists URL path extensions that are not worth fetching as crawl
@@ -47,14 +47,7 @@ func hostOf(raw string) string {
 // "api.example.com"). It falls back to the bare host when the public-suffix
 // lookup fails (e.g. for IPs or localhost).
 func registeredDomain(raw string) string {
-	host := hostOf(raw)
-	if host == "" {
-		return ""
-	}
-	if d, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
-		return d
-	}
-	return host
+	return renderer.RegisteredDomain(raw)
 }
 
 // sameRegisteredDomain reports whether raw shares a registered domain with the

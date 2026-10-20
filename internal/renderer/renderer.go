@@ -2,6 +2,12 @@ package renderer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/url"
+	"strings"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // JSBlob represents a JavaScript code blob found on a page
@@ -67,4 +73,35 @@ type Session interface {
 // target so state from one host never bleeds into another.
 type Sessioner interface {
 	NewSession() (Session, error)
+}
+
+// BodyHash returns the hex SHA-256 of a resource body. It identifies a
+// script independently of the URL it was served from.
+func BodyHash(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// RegisteredDomain returns the eTLD+1 of a URL's host ("example.com" for
+// "api.example.com"), lower-cased. It falls back to the bare host when the
+// public-suffix lookup fails (IP addresses, localhost).
+func RegisteredDomain(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return ""
+	}
+	if d, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+		return d
+	}
+	return host
+}
+
+// SameRegisteredDomain reports whether raw's host shares the given registered
+// domain. An empty domain matches nothing.
+func SameRegisteredDomain(domain, raw string) bool {
+	return domain != "" && RegisteredDomain(raw) == strings.ToLower(domain)
 }

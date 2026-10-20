@@ -82,6 +82,24 @@ func init() {
 	scanCmd.Flags().BoolVar(&cfg.IncludeEntropy, "include-entropy", false, "enable entropy-based detection")
 	scanCmd.Flags().Float64Var(&cfg.MinEntropy, "min-entropy", 4.5, "minimum entropy threshold")
 	scanCmd.Flags().IntVar(&cfg.MinLength, "min-length", 20, "minimum token length for detection")
+	scanCmd.Flags().StringSliceVar(&cfg.Detectors, "detectors", nil, "run only these detectors (names or type words: secret, config, endpoint, generic); see `webhog detectors`")
+	scanCmd.Flags().StringSliceVar(&cfg.ExcludeDetectors, "exclude-detectors", nil, "skip these detectors (same vocabulary as --detectors)")
+	scanCmd.Flags().IntVar(&cfg.GenericCap, "generic-cap", scanner.DefaultGenericCap, "matches one Generic detector may report from one file before the rest are counted as overflow (-1 = no cap)")
+	scanCmd.Flags().BoolVar(&cfg.FirstPartyOnly, "first-party-only", false, "scan only resources served from the target's registered domain; third-party scripts are fetched for crawling but not mined")
+}
+
+// scannerOptions builds the scanner configuration for one target.
+func scannerOptions(target string) scanner.Options {
+	return scanner.Options{
+		IncludeEntropy: cfg.IncludeEntropy,
+		MinEntropy:     cfg.MinEntropy,
+		MinLength:      cfg.MinLength,
+		Include:        cfg.Detectors,
+		Exclude:        cfg.ExcludeDetectors,
+		GenericCap:     cfg.GenericCap,
+		ScopeDomain:    renderer.RegisteredDomain(target),
+		FirstPartyOnly: cfg.FirstPartyOnly,
+	}
 }
 
 // limiter is the process-wide request pacer, built from --rate-limit and
@@ -91,6 +109,9 @@ var limiter *ratelimit.Limiter
 func runScan(cmd *cobra.Command, args []string) error {
 	targets, err := collectTargets(args)
 	if err != nil {
+		return err
+	}
+	if err := scanner.ValidateDetectorNames(append(append([]string{}, cfg.Detectors...), cfg.ExcludeDetectors...)); err != nil {
 		return err
 	}
 	limiter = ratelimit.New(cfg.RateLimit, cfg.Delay)
@@ -315,7 +336,7 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 	// The crawl frontier is expanded with both <a href> anchors and the
 	// endpoints the scanner discovers inside JavaScript/HTML, so additional
 	// attack surface (API paths, internal URLs) is fetched and mined too.
-	endpointScanner := scanner.NewScanner(cfg.IncludeEntropy, cfg.MinEntropy, cfg.MinLength)
+	endpointScanner := scanner.NewScanner(scannerOptions(target))
 	discoverEndpoints := func(res *renderer.RenderResult) []string {
 		return endpointScanner.ExtractEndpoints(res)
 	}
@@ -343,10 +364,11 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		techSet      = make(map[string]bool)
 	)
 
+	var s *scanner.Scanner
 	findingsChan := make(chan scanner.Finding)
 	go func() {
 		defer close(findingsChan)
-		s := scanner.NewScanner(cfg.IncludeEntropy, cfg.MinEntropy, cfg.MinLength)
+		s = scanner.NewScanner(scannerOptions(target))
 
 		for page := range c.Crawl(context.Background(), seeds...) {
 			if page.Err != nil {
@@ -423,6 +445,7 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		PagesCrawled:       pagesCrawled,
 		JSBlobs:            totalJSBlobs,
 		JSRefused:          totalRefused,
+		JSDeduped:          s.Deduped(),
 		Technologies:       sortedKeys(techSet),
 		Findings:           displayFindings,
 	}

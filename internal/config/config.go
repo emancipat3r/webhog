@@ -28,6 +28,12 @@ type Config struct {
 	MinLength      int
 	Verify         bool
 
+	// Detector selection and noise control.
+	Detectors        []string // run only these detectors (names or type words)
+	ExcludeDetectors []string // skip these detectors
+	GenericCap       int      // per-file cap on each Generic detector (-1 = none)
+	FirstPartyOnly   bool     // mine only resources on the target's registered domain
+
 	// Pacing and parallelism.
 	RateLimit   float64       // max requests per second webhog originates (0 = unlimited)
 	Delay       time.Duration // minimum spacing between requests (0 = none)

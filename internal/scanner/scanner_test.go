@@ -25,7 +25,7 @@ func TestLoadedFromProvenance(t *testing.T) {
 		},
 	}
 
-	s := NewScanner(false, 0, 0)
+	s := NewScanner(Options{})
 	findings := s.Scan(result)
 
 	var sawJS, sawHTML bool
