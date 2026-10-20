@@ -28,6 +28,15 @@ type Detector struct {
 	Name string
 	Type DetectorType
 	Re   *regexp.Regexp
+	// Keyword is a lower-case literal that must appear in a line before Re is
+	// tried against it. It is a cheap prefilter for large bundles; an empty
+	// Keyword means the regex always runs.
+	Keyword string
+	// Public marks a credential shape that is meant to be served to browsers
+	// (a Stripe publishable key, a Datadog client token, a Sentry DSN). The
+	// match is still reported, so a consumer sees what the page ships, but it
+	// is labelled so nobody triages it as a leak.
+	Public bool
 }
 
 // Finding represents a discovered secret or endpoint
@@ -45,4 +54,21 @@ type Finding struct {
 	// (serialized as null) when the match is in the page's own HTML/inline body,
 	// because Path already is that page.
 	LoadedFrom *string `json:"loaded_from"`
+	// Public is true when the detector describes a credential that is public
+	// by design (see Detector.Public).
+	Public bool `json:"public,omitempty"`
+	// ThirdParty is true when the resource in Path is served from a registered
+	// domain other than the scan target's: a tag manager, an analytics
+	// vendor, a CDN-hosted library. Secrets in such files belong to whoever
+	// publishes the file, not to the target.
+	ThirdParty bool `json:"third_party,omitempty"`
+	// Details carries facts derived from the token itself without any
+	// network traffic: a JWT's issuer and expiry, the AWS account an access
+	// key belongs to, the mode of a Stripe key. Verifiers add what the
+	// provider said (scopes, account identity) under the same map.
+	Details map[string]string `json:"details,omitempty"`
+	// Overflow is set on the last finding kept for a (file, detector) pair
+	// when the generic cap dropped further matches in the same file; it is
+	// the number of matches not reported.
+	Overflow int `json:"overflow,omitempty"`
 }
