@@ -598,28 +598,76 @@ func sortedKeys(set map[string]bool) []string {
 }
 
 // verifyFindings consumes findings and, for secrets that have a registered
-// provider verifier, annotates each with its verification status. Results are
-// cached per (detector, token) so duplicate matches are only checked once.
+// provider verifier, annotates each with its verification status and what
+// the provider said about the credential. Results are cached per (detector,
+// token) so duplicate matches are only checked once. Public-by-design
+// shapes are not verified: there is nothing to learn from a key meant to
+// be in the page.
+//
+// AWS keys are verified as a pair. An access key ID and a secret found in
+// the same file are signed into one STS GetCallerIdentity call; whichever
+// of the two findings arrives second carries the result.
 func verifyFindings(in <-chan scanner.Finding) <-chan scanner.Finding {
 	out := make(chan scanner.Finding)
 	go func() {
 		defer close(out)
 		v := verifier.New(10 * time.Second)
-		cache := make(map[string]scanner.Verification)
+		cache := make(map[string]verifier.Result)
 		ctx := context.Background()
+		awsIDs := map[string][]string{}     // path -> access key IDs seen
+		awsSecrets := map[string][]string{} // path -> secrets seen
 
 		for f := range in {
-			if f.Type == scanner.DetectorSecret && v.CanVerify(f.Detector) {
-				key := f.Detector + "|" + f.Token
-				status, ok := cache[key]
-				if !ok {
-					status = v.Verify(ctx, f.Detector, f.Token)
-					cache[key] = status
+			switch {
+			case f.Public:
+			case f.Detector == "AWS Access Key ID" || f.Detector == "AWS Secret Key":
+				var pair []string
+				if f.Detector == "AWS Access Key ID" {
+					awsIDs[f.Path] = append(awsIDs[f.Path], f.Token)
+					for _, secret := range awsSecrets[f.Path] {
+						pair = []string{f.Token, secret}
+					}
+				} else {
+					awsSecrets[f.Path] = append(awsSecrets[f.Path], f.Token)
+					for _, id := range awsIDs[f.Path] {
+						pair = []string{id, f.Token}
+					}
 				}
-				f.Verification = status
+				if pair != nil {
+					key := "aws|" + pair[0] + "|" + pair[1]
+					r, ok := cache[key]
+					if !ok {
+						r = v.VerifyAWSPair(ctx, pair[0], pair[1])
+						cache[key] = r
+					}
+					applyResult(&f, r)
+				}
+			case v.CanVerify(f.Detector):
+				key := f.Detector + "|" + f.Token
+				r, ok := cache[key]
+				if !ok {
+					r = v.Verify(ctx, f)
+					cache[key] = r
+				}
+				applyResult(&f, r)
 			}
 			out <- f
 		}
 	}()
 	return out
+}
+
+// applyResult copies a verification onto the finding, merging provider
+// details with the offline ones.
+func applyResult(f *scanner.Finding, r verifier.Result) {
+	f.Verification = r.Status
+	if len(r.Details) == 0 {
+		return
+	}
+	if f.Details == nil {
+		f.Details = map[string]string{}
+	}
+	for k, val := range r.Details {
+		f.Details[k] = val
+	}
 }

@@ -69,3 +69,15 @@ func TestEnrichmentRidesOnTheFinding(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestFirebaseConfigDetailsComeFromTheLine(t *testing.T) {
+	line := `const firebaseConfig={apiKey:"AIza` + `SyA-9dZ3l8Bx_qWmEr0tUvWxYz12-Ab34Cd",authDomain:"demo-app.firebaseapp.com",databaseURL:"https://demo-app-default-rtdb.firebaseio.com",projectId:"demo-app",storageBucket:"demo-app.appspot.com",messagingSenderId:"123",appId:"1:123:web:abc"};`
+	got := scanBody(Options{Include: []string{"Firebase Config"}}, "https://www.example.com/a.js", line)
+	if len(got) != 1 {
+		t.Fatalf("got %d findings", len(got))
+	}
+	d := got[0].Details
+	if d["project_id"] != "demo-app" || d["storage_bucket"] != "demo-app.appspot.com" || d["database_url"] != "https://demo-app-default-rtdb.firebaseio.com" || d["app_id"] != "1:123:web:abc" {
+		t.Errorf("details %v", d)
+	}
+}

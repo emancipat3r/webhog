@@ -370,7 +370,7 @@ func (s *Scanner) scanBlob(blob renderer.JSBlob, loadedFrom string) []Finding {
 					Public:     detector.Public,
 					ThirdParty: thirdParty,
 				}
-				enrich(&f)
+				enrich(&f, line)
 				findings = append(findings, f)
 			}
 		}

@@ -5,16 +5,41 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// enrich fills Finding.Details with facts derivable from the token alone.
-// It makes no network request. Each helper is a no-op for tokens it does
-// not understand, so a detector table change never breaks enrichment.
-func enrich(f *Finding) {
+// firebaseField reads one quoted field of a Firebase config object.
+var firebaseField = regexp.MustCompile(`(?i)(projectId|authDomain|databaseURL|storageBucket|appId|messagingSenderId)["']?\s*[:=]\s*["']([^"']+)["']`)
+
+// firebaseConfigDetails pulls the identifiers out of the config object on
+// the line, under snake_case keys. The verifier uses project_id,
+// storage_bucket and database_url to test the project's rules.
+func firebaseConfigDetails(line string) map[string]string {
+	names := map[string]string{
+		"projectid": "project_id", "authdomain": "auth_domain", "databaseurl": "database_url",
+		"storagebucket": "storage_bucket", "appid": "app_id", "messagingsenderid": "messaging_sender_id",
+	}
+	d := map[string]string{}
+	for _, m := range firebaseField.FindAllStringSubmatch(line, -1) {
+		key := names[strings.ToLower(m[1])]
+		if _, done := d[key]; !done {
+			d[key] = m[2]
+		}
+	}
+	return d
+}
+
+// enrich fills Finding.Details with facts derivable from the token and the
+// line it sits on. It makes no network request. Each helper is a no-op for
+// tokens it does not understand, so a detector table change never breaks
+// enrichment.
+func enrich(f *Finding, line string) {
 	switch f.Detector {
+	case "Firebase Config":
+		f.Details = firebaseConfigDetails(line)
 	case "JWT Token":
 		f.Details = jwtDetails(f.Token)
 	case "AWS Access Key ID":

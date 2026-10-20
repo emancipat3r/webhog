@@ -32,8 +32,8 @@ func TestCanVerify(t *testing.T) {
 	if !v.CanVerify("GitHub Personal Access Token") {
 		t.Error("expected a verifier for GitHub Personal Access Token")
 	}
-	if v.CanVerify("Google API Key") {
-		t.Error("did not expect a verifier for Google API Key")
+	if v.CanVerify("Generic Token") {
+		t.Error("did not expect a verifier for Generic Token")
 	}
 }
 
@@ -41,7 +41,7 @@ func TestCanVerify(t *testing.T) {
 // VerifyNone rather than blocking on a network call.
 func TestVerifyUnregisteredDetector(t *testing.T) {
 	v := New(time.Second)
-	if got := v.Verify(t.Context(), "Google API Key", "AIzaWhatever"); got != scanner.VerifyNone {
-		t.Errorf("Verify for unregistered detector = %q, want %q", got, scanner.VerifyNone)
+	if got := v.Verify(t.Context(), scanner.Finding{Detector: "Generic Token", Token: "whatever"}); got.Status != scanner.VerifyNone {
+		t.Errorf("Verify for unregistered detector = %q, want %q", got.Status, scanner.VerifyNone)
 	}
 }
