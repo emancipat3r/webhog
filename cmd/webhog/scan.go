@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -43,7 +44,8 @@ for JavaScript-heavy applications.`,
 
 func init() {
 	// Mode flags
-	scanCmd.Flags().BoolVar(&cfg.Headless, "headless", false, "use headless browser rendering")
+	scanCmd.Flags().BoolVar(&cfg.Headless, "headless", false, "use headless browser rendering (same as --mode headless)")
+	scanCmd.Flags().StringVar(&cfg.Mode, "mode", "static", "static: HTTP only; headless: browser for every page; auto: HTTP first, browser for a target whose answer looks like bot management")
 	scanCmd.Flags().DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "page load timeout")
 	scanCmd.Flags().DurationVar(&cfg.DOMWait, "dom-wait", renderer.DefaultDOMWait, "headless: time to let a page settle after load before reading it (0 = none)")
 
@@ -54,6 +56,7 @@ func init() {
 	scanCmd.Flags().IntVar(&cfg.MaxDepth, "max-depth", 0, "maximum crawl depth (0 = single URL only)")
 	scanCmd.Flags().IntVar(&cfg.MaxPages, "max-pages", 200, "maximum pages to crawl per target (0 = unlimited)")
 	scanCmd.Flags().BoolVar(&cfg.SameDomain, "same-domain", true, "restrict the crawl to the seed's registered (apex) domain; set to false to follow off-domain links too")
+	scanCmd.Flags().BoolVar(&cfg.ProbeConfig, "probe-config", false, "also scan the well-known runtime config paths (config.json, env.js, ...) as seeds")
 	scanCmd.Flags().BoolVar(&cfg.Robots, "robots", false, "use robots.txt as an enumeration source: scan its Disallow/Allow paths and Sitemap URLs (does NOT honor crawl restrictions)")
 
 	// Pacing flags. The limiter is process-wide: it covers every request webhog
@@ -72,6 +75,7 @@ func init() {
 	scanCmd.Flags().BoolVar(&cfg.Quiet, "quiet", false, "minimal output")
 	scanCmd.Flags().BoolVar(&cfg.PlainOutput, "plain", false, "disable styled output")
 	scanCmd.Flags().StringVarP(&cfg.OutputFile, "output", "o", "", "write results to file")
+	scanCmd.Flags().BoolVar(&cfg.Redact, "redact", false, "mask every token in text and JSON output (first and last four characters stay)")
 	scanCmd.Flags().StringVar(&cfg.Baseline, "baseline", "", "earlier webhog output (--json, --jsonl or one report) to compare against: findings it did not hold are marked new, script changes are counted")
 	scanCmd.Flags().BoolVar(&cfg.OnlyNew, "only-new", false, "with --baseline, report only findings the baseline did not hold")
 
@@ -115,6 +119,22 @@ func scannerOptions(target string) scanner.Options {
 	}
 }
 
+// loadBaseline reads --baseline into base, if one was given.
+func loadBaseline() error {
+	if cfg.Baseline == "" {
+		return nil
+	}
+	b, err := baseline.Load(cfg.Baseline)
+	if err != nil {
+		return fmt.Errorf("reading --baseline: %w", err)
+	}
+	base = b
+	if cfg.Verbose && !cfg.Quiet {
+		fmt.Fprintf(os.Stderr, "baseline: %d report(s)\n", b.Reports())
+	}
+	return nil
+}
+
 // expandOptions maps the expansion flags onto the expander.
 func expandOptions() expand.Options {
 	return expand.Options{
@@ -149,15 +169,8 @@ func runScan(cmd *cobra.Command, args []string) error {
 	if cfg.OnlyNew && cfg.Baseline == "" {
 		return fmt.Errorf("--only-new needs --baseline")
 	}
-	if cfg.Baseline != "" {
-		b, err := baseline.Load(cfg.Baseline)
-		if err != nil {
-			return fmt.Errorf("reading --baseline: %w", err)
-		}
-		base = b
-		if cfg.Verbose && !cfg.Quiet {
-			fmt.Fprintf(os.Stderr, "baseline: %d report(s)\n", b.Reports())
-		}
+	if err := loadBaseline(); err != nil {
+		return err
 	}
 
 	// Renderer and tech detector are created once and reused across targets.
@@ -167,13 +180,28 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// applied by the crawler, so the base context carries no overall deadline.
 	httpCfg := buildHTTPConfig()
 	fetcher = expand.NewFetcher(cfg.Timeout, httpCfg, cfg.MaxMapSize)
-	var r renderer.Renderer
+	mode := strings.ToLower(cfg.Mode)
 	if cfg.Headless {
+		mode = "headless"
+	}
+	var r renderer.Renderer
+	switch mode {
+	case "headless":
 		hr := renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg).SetDOMWait(cfg.DOMWait)
 		defer hr.Close()
 		r = hr
-	} else {
+	case "auto":
+		hr := renderer.NewHeadlessRenderer(cfg.Timeout, httpCfg).SetDOMWait(cfg.DOMWait)
+		defer hr.Close()
+		r = renderer.NewAutoRenderer(renderer.NewStaticRenderer(cfg.Timeout, httpCfg), hr, func(u string) {
+			if !cfg.Quiet {
+				fmt.Fprintf(os.Stderr, "%s looks like bot management: switching this target to the browser\n", u)
+			}
+		})
+	case "static", "":
 		r = renderer.NewStaticRenderer(cfg.Timeout, httpCfg)
+	default:
+		return fmt.Errorf("unknown --mode %q (static, headless, auto)", cfg.Mode)
 	}
 	detector, _ := tech.NewDetector()
 
@@ -396,6 +424,9 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 	// (Disallow/Allow entries and Sitemap URLs) and added as seeds, so they are
 	// enumerated even without deep crawling.
 	seeds := []string{target}
+	if cfg.ProbeConfig {
+		seeds = append(seeds, configSeeds(target)...)
+	}
 	if cfg.Robots {
 		robotsTargets := crawler.RobotsTargets(context.Background(), target, &http.Client{Timeout: cfg.Timeout}, buildHTTPConfig())
 		if cfg.Verbose && !cfg.Quiet {
@@ -477,13 +508,16 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 		if cfg.Verbose && !cfg.Quiet {
 			fmt.Fprintln(os.Stderr, "Verifying secrets against provider APIs...")
 		}
-		outChan = verifyFindings(findingsChan)
+		outChan = verifyFindings(outChan)
 	}
 
 	// StreamOutput drains the channel, printing findings progressively (for
 	// non-JSON output), and returns the deduplicated set. It returns only after
 	// the scan goroutine has closed the channel, so the aggregate counters are
 	// safe to read below.
+	if cfg.Redact {
+		outChan = redactFindings(outChan)
+	}
 	displayFindings := outputter.StreamOutput(w, outChan)
 
 	if pagesCrawled == 0 {
@@ -539,6 +573,30 @@ func scanOne(w io.Writer, r renderer.Renderer, detector *tech.Detector, target s
 	}
 
 	return report, nil
+}
+
+// configPaths are where single-page apps keep runtime configuration that
+// is fetched after load and so is not in any bundle: the deploy-time
+// environment, feature flags, and the keys for the services the app
+// talks to.
+var configPaths = []string{
+	"/config.json", "/config.js", "/env.js", "/env.json", "/environment.json",
+	"/assets/config.json", "/assets/env.js", "/assets/environment.json",
+	"/static/config.json", "/api/config", "/api/v1/config", "/.well-known/openid-configuration",
+}
+
+// configSeeds returns the config probe URLs for a target's origin.
+func configSeeds(target string) []string {
+	u, err := url.Parse(target)
+	if err != nil {
+		return nil
+	}
+	origin := u.Scheme + "://" + u.Host
+	out := make([]string, 0, len(configPaths))
+	for _, p := range configPaths {
+		out = append(out, origin+p)
+	}
+	return out
 }
 
 // buildHTTPConfig assembles the per-request identity (custom User-Agent and
@@ -701,6 +759,18 @@ func verifyFindings(in <-chan scanner.Finding) <-chan scanner.Finding {
 				applyResult(&f, r)
 			}
 			out <- f
+		}
+	}()
+	return out
+}
+
+// redactFindings masks tokens before they reach any output.
+func redactFindings(in <-chan scanner.Finding) <-chan scanner.Finding {
+	out := make(chan scanner.Finding)
+	go func() {
+		defer close(out)
+		for f := range in {
+			out <- f.Redacted()
 		}
 	}()
 	return out

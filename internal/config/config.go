@@ -11,6 +11,9 @@ type Config struct {
 
 	// Scan flags
 	Headless       bool
+	Mode           string // static, headless or auto
+	Redact         bool   // mask tokens in every output
+	ProbeConfig    bool   // seed well-known config file paths
 	Timeout        time.Duration
 	DOMWait        time.Duration // headless: settle time after load
 	ListFile       string

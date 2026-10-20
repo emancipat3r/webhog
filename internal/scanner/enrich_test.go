@@ -81,3 +81,14 @@ func TestFirebaseConfigDetailsComeFromTheLine(t *testing.T) {
 		t.Errorf("details %v", d)
 	}
 }
+
+func TestRedactedKeepsTheEnds(t *testing.T) {
+	f := Finding{Token: "AIza" + "SyA-9dZ3l8Bx_qWmEr0tUvWxYz12-Ab34Cd", Snippet: `k="AIza` + `SyA-9dZ3l8Bx_qWmEr0tUvWxYz12-Ab34Cd"`}
+	r := f.Redacted()
+	if r.Token != "AIza…34Cd" || r.Snippet != `k="AIza…34Cd"` {
+		t.Errorf("got %+v", r)
+	}
+	if Mask("short") != "********" {
+		t.Error("short tokens must be fully masked")
+	}
+}

@@ -36,10 +36,10 @@ type HTTPConfig struct {
 	// Headers are extra request headers added to every request, applied in order.
 	Headers []Header
 	// Limiter paces every request webhog originates against the target: page
-	// fetches, script fetches in static mode, robots.txt, and headless
-	// navigations. nil means unlimited. Sub-resources the browser fetches on
-	// its own during a navigation are outside its reach; one navigation
-	// counts as one request.
+	// fetches, script fetches in static mode, robots.txt, source map and
+	// chunk fetches, headless navigations, and the script and XHR loads the
+	// browser makes during a navigation (held at the request stage until the
+	// limiter grants a slot). nil means unlimited.
 	Limiter *ratelimit.Limiter
 }
 

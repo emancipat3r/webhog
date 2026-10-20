@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emancipat3r/webhog/internal/ratelimit"
 	"github.com/go-rod/rod/lib/launcher"
 )
 
@@ -260,5 +261,46 @@ func TestSplitHeaderValues(t *testing.T) {
 		if strings.Join(got, "|") != strings.Join(want, "|") {
 			t.Errorf("splitHeaderValues(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestHeadlessSubresourcesArePaced: with a limiter, the scripts the browser
+// loads during a navigation are released through it, so a page with three
+// scripts takes at least three intervals beyond the navigation.
+func TestHeadlessSubresourcesArePaced(t *testing.T) {
+	requireBrowser(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><script src="/a.js"></script><script src="/b.js"></script><script src="/c.js"></script></html>`))
+		default:
+			w.Header().Set("Content-Type", "application/javascript")
+			_, _ = w.Write([]byte("var x=1;"))
+		}
+	}))
+	defer srv.Close()
+
+	const interval = 300 * time.Millisecond
+	r := NewHeadlessRenderer(20*time.Second, HTTPConfig{Limiter: ratelimit.New(0, interval)})
+	defer r.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Warm the browser so launch time is not in the measurement.
+	if _, err := r.Render(ctx, srv.URL+"/a.js"); err != nil {
+		t.Fatalf("warm-up: %v", err)
+	}
+	start := time.Now()
+	res, err := r.Render(ctx, srv.URL+"/")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	elapsed := time.Since(start)
+	if n := len(res.JSBlobs); n != 3 {
+		t.Fatalf("captured %d blobs, want 3", n)
+	}
+	// Navigation plus three scripts: four slots, the first may be free.
+	if elapsed < 3*interval {
+		t.Errorf("three paced sub-resources finished in %v, want at least %v", elapsed, 3*interval)
 	}
 }

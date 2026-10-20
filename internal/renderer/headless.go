@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/emancipat3r/webhog/internal/ratelimit"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
@@ -409,11 +410,12 @@ type capturedBody struct {
 // receives them. Bodies are keyed by URL (first response wins) and kept in
 // arrival order.
 type bodyCapture struct {
-	mu     sync.Mutex
-	wg     sync.WaitGroup
-	order  []string
-	byURL  map[string]capturedBody
-	errors []ResourceError
+	mu      sync.Mutex
+	wg      sync.WaitGroup
+	order   []string
+	byURL   map[string]capturedBody
+	errors  []ResourceError
+	limiter *ratelimit.Limiter // paces request-stage pauses; nil = none
 }
 
 // captureBodies enables response-stage interception on the page for scripts
@@ -428,14 +430,26 @@ type bodyCapture struct {
 func (h *HeadlessRenderer) captureBodies(page *rod.Page) (*bodyCapture, error) {
 	c := &bodyCapture{byURL: make(map[string]capturedBody)}
 
-	patterns := make([]*proto.FetchRequestPattern, 0, len(capturedResourceTypes))
+	patterns := make([]*proto.FetchRequestPattern, 0, 2*len(capturedResourceTypes))
 	for _, t := range capturedResourceTypes {
 		patterns = append(patterns, &proto.FetchRequestPattern{
 			URLPattern:   "*",
 			ResourceType: t,
 			RequestStage: proto.FetchRequestStageResponse,
 		})
+		if h.httpCfg.Limiter != nil {
+			// With a limiter, the browser's own script and XHR loads are
+			// paused before they leave and released through the same
+			// limiter as every other request, so the ceiling holds for
+			// sub-resources too.
+			patterns = append(patterns, &proto.FetchRequestPattern{
+				URLPattern:   "*",
+				ResourceType: t,
+				RequestStage: proto.FetchRequestStageRequest,
+			})
+		}
 	}
+	c.limiter = h.httpCfg.Limiter
 	if err := (proto.FetchEnable{Patterns: patterns}).Call(page); err != nil {
 		return nil, err
 	}
@@ -481,7 +495,11 @@ func (c *bodyCapture) handle(page *rod.Page, e *proto.FetchRequestPaused) {
 		return
 	}
 	if e.ResponseStatusCode == nil {
-		// Request stage; should not happen with response-stage patterns.
+		// Request stage: the request has not left yet. Hold it until the
+		// limiter grants a slot, then the deferred continue releases it.
+		if c.limiter != nil {
+			_ = c.limiter.Wait(page.GetContext())
+		}
 		return
 	}
 	status := *e.ResponseStatusCode

@@ -1,6 +1,9 @@
 package scanner
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // DetectorType categorizes the type of finding
 type DetectorType string
@@ -74,4 +77,25 @@ type Finding struct {
 	// when the generic cap dropped further matches in the same file; it is
 	// the number of matches not reported.
 	Overflow int `json:"overflow,omitempty"`
+}
+
+// Mask hides the middle of a token: the first and last four characters
+// stay so two reports can be matched up, the rest is replaced. Short
+// tokens are replaced entirely.
+func Mask(token string) string {
+	if len(token) <= 12 {
+		return "********"
+	}
+	return token[:4] + "…" + token[len(token)-4:]
+}
+
+// Redacted returns a copy of the finding with its token masked in the
+// token and snippet fields.
+func (f Finding) Redacted() Finding {
+	masked := Mask(f.Token)
+	if f.Token != "" {
+		f.Snippet = strings.ReplaceAll(f.Snippet, f.Token, masked)
+	}
+	f.Token = masked
+	return f
 }
