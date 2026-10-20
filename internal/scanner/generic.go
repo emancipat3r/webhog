@@ -81,3 +81,24 @@ func capGeneric(findings []Finding, cap int) []Finding {
 	}
 	return kept
 }
+
+// dropGenericDuplicates removes a Generic finding whose token a named
+// detector already reported, in this blob or earlier in the target. The
+// Generic rules match the same assignment the named rule matched, so the
+// row is the same fact under a vaguer name. Named tokens seen are added
+// to the set so a later file's Generic copy is dropped too.
+func dropGenericDuplicates(findings []Finding, named map[string]bool) []Finding {
+	for _, f := range findings {
+		if f.Type == DetectorSecret || f.Type == DetectorConfig {
+			named[f.Token] = true
+		}
+	}
+	kept := findings[:0]
+	for _, f := range findings {
+		if f.Type == DetectorGeneric && named[f.Token] {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
+}

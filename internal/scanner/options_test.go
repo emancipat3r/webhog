@@ -199,3 +199,27 @@ func TestIdenticalBodiesAreScannedOnce(t *testing.T) {
 		t.Errorf("changed body not scanned: %d findings", len(d))
 	}
 }
+
+// TestGenericCopyOfANamedMatchIsDropped: the same token under a named
+// detector and a Generic one yields the named row only, in the same file
+// and when the Generic copy comes in a later file of the same target.
+func TestGenericCopyOfANamedMatchIsDropped(t *testing.T) {
+	key := "AIza" + "SyA-9dZ3l8Bx_qWmEr0tUvWxYz12-Ab34Cd"
+	s := NewScanner(Options{})
+	got := s.Scan(&renderer.RenderResult{URL: "https://www.example.com/", HTML: "<html></html>",
+		JSBlobs: []renderer.JSBlob{{Source: "external", Path: "https://www.example.com/a.js", Body: `api_key: "` + key + `"`, Status: 200}}})
+	if len(got) != 1 || got[0].Detector != "Google API Key" {
+		t.Errorf("same file: %v", names(got))
+	}
+	later := s.Scan(&renderer.RenderResult{URL: "https://www.example.com/b", HTML: "<html></html>",
+		JSBlobs: []renderer.JSBlob{{Source: "external", Path: "https://www.example.com/b.js", Body: `token = "` + key + `"`, Status: 200}}})
+	if len(later) != 1 || later[0].Type == DetectorGeneric {
+		t.Errorf("later file: want the named row only, got %v", names(later))
+	}
+	// A Generic token nothing named is kept.
+	alone := s.Scan(&renderer.RenderResult{URL: "https://www.example.com/c", HTML: "<html></html>",
+		JSBlobs: []renderer.JSBlob{{Source: "external", Path: "https://www.example.com/c.js", Body: `token = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"`, Status: 200}}})
+	if len(alone) != 1 {
+		t.Errorf("unnamed generic token dropped: %v", names(alone))
+	}
+}

@@ -46,6 +46,7 @@ type Scanner struct {
 	anyKeyword     bool
 	seenBodies     map[string]string // body hash -> path first scanned under
 	deduped        int
+	namedTokens    map[string]bool // tokens a named detector reported in this target
 }
 
 // NewScanner creates a new scanner with the given configuration. Unknown
@@ -65,6 +66,7 @@ func NewScanner(opts Options) *Scanner {
 		scopeDomain:    strings.ToLower(opts.ScopeDomain),
 		firstPartyOnly: opts.FirstPartyOnly,
 		seenBodies:     make(map[string]string),
+		namedTokens:    make(map[string]bool),
 	}
 	for _, d := range s.detectors {
 		if d.Keyword != "" {
@@ -381,7 +383,7 @@ func (s *Scanner) scanBlob(blob renderer.JSBlob, loadedFrom string) []Finding {
 		}
 	}
 
-	return capGeneric(findings, s.genericCap)
+	return capGeneric(dropGenericDuplicates(findings, s.namedTokens), s.genericCap)
 }
 
 // isThirdParty reports whether a fetched resource is served from a registered
